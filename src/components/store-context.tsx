@@ -1,0 +1,120 @@
+"use client";
+
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import en from "@/messages/en.json";
+import bn from "@/messages/bn.json";
+import { normalizeQuantity } from "@/lib/product-units";
+
+export type Locale = "en" | "bn";
+export type CartLine = { id: string; slug: string; name: string; image: string; price: number; quantity: number; unit?: string; variantId?: string; variantLabel?: string };
+export const cartLineKey = (line: Pick<CartLine, "id" | "variantId">) => `${line.id}:${line.variantId ?? ""}`;
+type StoreContextValue = {
+  locale: Locale;
+  setLocale: (locale: Locale) => void;
+  t: (key: keyof typeof en) => string;
+  cart: CartLine[];
+  addToCart: (line: Omit<CartLine, "quantity"> & { quantity?: number }) => void;
+  updateQuantity: (key: string, quantity: number) => void;
+  removeFromCart: (key: string) => void;
+  clearCart: () => void;
+};
+const Context = createContext<StoreContextValue | null>(null);
+
+export function StoreProvider({ children }: { children: React.ReactNode }) {
+  const [locale, setLocaleState] = useState<Locale>("en");
+  const [cart, setCart] = useState<CartLine[]>([]);
+  const [cartReady, setCartReady] = useState(false);
+  const [syncCart, setSyncCart] = useState(false);
+  const cartRef = useRef<CartLine[]>([]);
+  useEffect(() => { cartRef.current = cart; }, [cart]);
+  const syncServerCart = useCallback(async (merge: CartLine[] = []) => {
+    try {
+      const authResponse = await fetch("/api/auth/me");
+      if (!authResponse.ok) return;
+      const auth = await authResponse.json() as { user?: { role?: string } | null };
+      if (!auth.user || auth.user.role !== "customer") { setSyncCart(false); return; }
+      const response = await fetch("/api/cart");
+      if (!response.ok) throw new Error("Could not sync your cart");
+      const data = await response.json() as { items?: CartLine[] };
+      const serverItems = data.items ?? [];
+      const merged = [...serverItems];
+      for (const local of merge) {
+        const key = cartLineKey(local);
+        const found = merged.find((item) => cartLineKey(item) === key);
+        if (found) found.quantity = Math.min(100_000, found.quantity + local.quantity);
+        else merged.push({ ...local, unit: local.unit ?? "piece" });
+      }
+      setCart(merged);
+      setSyncCart(true);
+    } catch (error) {
+      console.error("Could not sync the saved cart.", error);
+    }
+  }, []);
+  useEffect(() => {
+    const savedLocale = localStorage.getItem("eshop-locale");
+    if (savedLocale === "bn" || savedLocale === "en") window.setTimeout(() => {
+      document.documentElement.lang = savedLocale;
+      setLocaleState(savedLocale);
+    }, 0);
+    let localCart: CartLine[] = [];
+    try {
+      const savedCart = JSON.parse(localStorage.getItem("eshop-cart") ?? "[]") as CartLine[];
+      if (Array.isArray(savedCart)) { localCart = savedCart; window.setTimeout(() => setCart(savedCart), 0); }
+    } catch (error) {
+      console.warn("Could not read the saved cart.", error);
+    }
+    const readyTimer = window.setTimeout(() => setCartReady(true), 0);
+    const syncTimer = window.setTimeout(() => { void syncServerCart(localCart); }, 0);
+    const handleAuthChanged = () => { void syncServerCart(cartRef.current); };
+    window.addEventListener("eshop:auth-changed", handleAuthChanged);
+    return () => {
+      window.clearTimeout(readyTimer);
+      window.clearTimeout(syncTimer);
+      window.removeEventListener("eshop:auth-changed", handleAuthChanged);
+    };
+  }, [syncServerCart]);
+  useEffect(() => {
+    if (cartReady) localStorage.setItem("eshop-cart", JSON.stringify(cart));
+  }, [cart, cartReady]);
+  useEffect(() => {
+    if (!syncCart || !cartReady) return;
+    const timer = window.setTimeout(async () => {
+      const response = await fetch("/api/cart", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: cart.map((item) => ({ productId: item.id, ...(item.variantId ? { variantId: item.variantId } : {}), quantity: item.quantity })) }),
+      });
+      if (!response.ok) console.error("Could not save your cart to your account.");
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [cart, cartReady, syncCart]);
+  const setLocale = useCallback((value: Locale) => {
+    setLocaleState(value);
+    localStorage.setItem("eshop-locale", value);
+    document.documentElement.lang = value;
+  }, []);
+  const addToCart = useCallback((line: Omit<CartLine, "quantity"> & { quantity?: number }) => {
+    setCart((current) => {
+      const key = cartLineKey(line);
+      const existing = current.find((item) => cartLineKey(item) === key);
+      const amount = normalizeQuantity(line.unit, line.quantity ?? 1);
+      if (existing) return current.map((item) => cartLineKey(item) === key ? { ...item, quantity: Math.min(item.quantity + amount, 100_000) } : item);
+      return [...current, { ...line, unit: line.unit ?? "piece", quantity: amount }];
+    });
+  }, []);
+  const updateQuantity = useCallback((key: string, quantity: number) => {
+    setCart((current) => quantity <= 0 ? current.filter((item) => cartLineKey(item) !== key) : current.map((item) => cartLineKey(item) === key ? { ...item, quantity: Math.min(normalizeQuantity(item.unit, quantity), 100_000) } : item));
+  }, []);
+  const removeFromCart = useCallback((key: string) => setCart((current) => current.filter((item) => cartLineKey(item) !== key)), []);
+  const clearCart = useCallback(() => setCart([]), []);
+  const value = useMemo(() => ({
+    locale, setLocale, t: (key: keyof typeof en) => (locale === "bn" ? bn : en)[key],
+    cart, addToCart, updateQuantity, removeFromCart, clearCart,
+  }), [locale, setLocale, cart, addToCart, updateQuantity, removeFromCart, clearCart]);
+  return <Context.Provider value={value}>{children}</Context.Provider>;
+}
+
+export function useStore() {
+  const context = useContext(Context);
+  if (!context) throw new Error("useStore must be used within StoreProvider");
+  return context;
+}
