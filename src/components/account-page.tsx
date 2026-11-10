@@ -28,7 +28,8 @@ export function AccountPage() {
       if (!response.ok || !result.user) throw new Error(result.error || "Could not sign in");
       setAccount(result.user);
       window.dispatchEvent(new Event("eshop:auth-changed"));
-      if (result.user.role === "vendor") router.push("/vendor");
+      if (result.user.role === "delivery_staff") router.push("/delivery");
+      else if (result.user.role === "vendor") router.push("/vendor");
       else if (result.user.role === "admin" || result.user.role === "super_admin") router.push("/admin");
       else router.push("/orders");
     } catch (reason) {
@@ -41,7 +42,7 @@ export function AccountPage() {
     setAccount(null);
     window.dispatchEvent(new Event("eshop:auth-changed"));
   }
-  if (account) return <div className="page-shell"><h1 className="page-title">Welcome, {account.name}</h1><p>{account.email}</p><div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}><Link className="button-primary" href={account.role === "vendor" ? "/vendor" : account.role === "admin" || account.role === "super_admin" ? "/admin" : "/orders"}>{account.role === "vendor" ? t("vendorDashboard") : account.role === "admin" || account.role === "super_admin" ? t("adminDashboard") : t("myOrders")}</Link><button className="button-secondary" onClick={logout}>Sign out</button></div>{error && <p className="form-error">{error}</p>}</div>;
+  if (account) return <div className="page-shell"><h1 className="page-title">Welcome, {account.name}</h1><p>{account.email}</p><div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}><Link className="button-primary" href={account.role === "delivery_staff" ? "/delivery" : account.role === "vendor" ? "/vendor" : account.role === "admin" || account.role === "super_admin" ? "/admin" : "/orders"}>{account.role === "delivery_staff" ? "Delivery dashboard" : account.role === "vendor" ? t("vendorDashboard") : account.role === "admin" || account.role === "super_admin" ? t("adminDashboard") : t("myOrders")}</Link><button className="button-secondary" onClick={logout}>Sign out</button></div>{error && <p className="form-error">{error}</p>}</div>;
   return <div className="page-shell"><p className="breadcrumb"><Link href="/">{t("home")}</Link>　/　{t("account")}</p><h1 className="page-title">{register ? t("createAccount") : t("welcomeBack")}</h1><form className="form-card" onSubmit={submit}>
     {error && <p className="form-error">{error}</p>}
     {register && <div className="field"><label htmlFor="name">{t("fullName")}</label><input id="name" name="name" autoComplete="name" required minLength={2} maxLength={120} /></div>}

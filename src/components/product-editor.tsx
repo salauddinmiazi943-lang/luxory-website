@@ -70,14 +70,16 @@ export function ProductEditor({
     setCategory(categoryId);
     const preset = categoryProductPreset(categories.find((item) => item._id === categoryId));
     if (!preset) return;
+    const msg = `Apply category preset? Unit: ${unitLabel(preset.unit)}${preset.options.length ? `, suggested options: ${preset.options.join(", ")}` : ""}. You can still change the unit/options.`;
+    if (typeof window !== "undefined" && !window.confirm(msg)) return;
     setUnit(preset.unit);
-    setVariants((current) => preset.options.map((label) => {
-      const previous = current.find((option) => option.label.trim().toLowerCase() === label.toLowerCase());
-      return previous
-        ? { ...previous, label }
-        : { label, price: "", stock: "" };
-    }));
-    setDiscountPrice("");
+    if (preset.options.length) {
+      setVariants((current) => preset.options.map((label) => {
+        const previous = current.find((option) => option.label.trim().toLowerCase() === label.toLowerCase());
+        return previous ? { ...previous, label } : { label, price: "", stock: "" };
+      }));
+      setDiscountPrice("");
+    }
   }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {

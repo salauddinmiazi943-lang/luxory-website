@@ -4,7 +4,7 @@ import { User } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
 
-const permissions = ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_vendors", "view_messages"] as const;
+const permissions = ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_delivery_staff", "manage_vendors", "view_messages"] as const;
 const schema = z.object({ status: z.enum(["active", "inactive"]).optional(), permissions: z.array(z.enum(permissions)).max(permissions.length).optional() });
 type Context = { params: Promise<{ id: string }> };
 

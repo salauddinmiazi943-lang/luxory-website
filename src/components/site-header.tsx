@@ -20,7 +20,9 @@ export function SiteHeader() {
       <div className="topline"><div className="wrap top-line-inner"><span>{t("topline")}</span><div className="top-links"><Link href="/contact">{t("contact")}</Link><button onClick={() => setLocale(locale === "en" ? "bn" : "en")}>{locale === "en" ? "বাংলা" : "English"}</button></div></div></div>
       <div className="wrap main-header">
         <button aria-label="Toggle navigation" className="mobile-menu" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={21} /> : <Menu size={21} />}</button>
-        <Link className="brand" href="/"><span className="brand-mark">e</span><span>eshop<span className="brand-dot">.</span></span></Link>
+        <Link className="brand" href="/" aria-label="Luxora Global Trade">
+          <img src="/logo.png" alt="Luxora Global Trade" className="brand-logo" />
+        </Link>
         <form className="search-box" onSubmit={submitSearch}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("search")} aria-label={t("search")} /><button aria-label="Search"><Search size={20} /></button></form>
         <div className="header-actions"><Link href="/account" className="header-action"><UserRound size={20} /><span>{t("account")}</span></Link><Link href="/cart" className="header-action cart-action"><span className="cart-icon"><ShoppingBag size={21} /><b>{cart.reduce((sum, item) => sum + item.quantity, 0)}</b></span><span>{t("cart")}</span></Link></div>
       </div>

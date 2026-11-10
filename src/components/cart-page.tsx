@@ -7,9 +7,10 @@ import { quantityStep, unitLabel } from "@/lib/product-units";
 export function CartPage() {
   const { cart, updateQuantity, removeFromCart, locale, t } = useStore();
   const total = cart.reduce((sum, line) => sum + line.price * line.quantity, 0);
+  const hasOriginal = cart.some((l) => l.originalPrice != null && l.originalPrice > l.price);
   return <div className="page-shell"><p className="breadcrumb"><Link href="/">{t("home")}</Link>　/　{t("cart")}</p><h1 className="page-title">{t("cart")}</h1>
     {!cart.length ? <div className="form-card"><p>{t("emptyCart")}</p><Link className="button-primary" href="/products">{t("continueShopping")}</Link></div> : <>
-      <div style={{ overflowX: "auto" }}><table className="cart-table"><thead><tr><th>Product</th><th>{t("price")}</th><th>{t("quantity")}</th><th>{t("subtotal")}</th><th /></tr></thead><tbody>{cart.map((line) => {
+      <div style={{ overflowX: "auto" }}><table className="cart-table"><thead><tr><th>Product</th><th>Original / Current</th><th>Discount</th><th>{t("quantity")}</th><th>{t("subtotal")}</th><th /></tr></thead><tbody>{cart.map((line) => {
         const key = cartLineKey(line);
         const unit = unitLabel(line.unit, locale);
         const step = quantityStep(line.unit);

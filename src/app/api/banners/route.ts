@@ -5,7 +5,22 @@ import { requirePermission } from "@/lib/auth";
 import { apiError, cloudinaryUrl, readJson, safeLink, translated } from "@/lib/http";
 
 const localized = z.object({ en: z.string().trim().min(1).max(500), bn: z.string().trim().max(500).optional() });
-const schema = z.object({ image: cloudinaryUrl(), title: localized, subtitle: localized, link: safeLink().default("/"), order: z.number().int().default(0), active: z.boolean().default(true) });
+const optionalLocalized = z.object({ en: z.string().trim().max(120).optional(), bn: z.string().trim().max(120).optional() }).optional();
+const optionalBannerLink = z.preprocess((value) => (typeof value === "string" ? value.trim() : value), z.union([z.literal(""), safeLink()]));
+const optionalScheduleDate = z.preprocess((value) => {
+  if (value === "" || value == null) return undefined;
+  if (value instanceof Date) return value;
+  if (typeof value === "string" || typeof value === "number") {
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? value : date;
+  }
+  return value;
+}, z.date().optional());
+const optionalBgColor = z.preprocess((value) => {
+  if (value === "" || value == null) return undefined;
+  return typeof value === "string" ? value.trim() : value;
+}, z.string().max(120).optional());
+const schema = z.object({ image: cloudinaryUrl(), title: localized, subtitle: localized, buttonText: optionalLocalized, bgColor: optionalBgColor, link: optionalBannerLink.default(""), order: z.number().int().default(0), active: z.boolean().default(true), startDate: optionalScheduleDate, endDate: optionalScheduleDate });
 
 export async function GET(request: Request) {
   try {
@@ -15,7 +30,15 @@ export async function GET(request: Request) {
       const access = await requirePermission("manage_banners");
       if ("error" in access) return access.error;
     }
-    const items = await Banner.find(showAll ? {} : { active: true }).sort({ order: 1, createdAt: -1 }).lean();
+    const now = new Date();
+    const publicFilter = {
+      active: true,
+      $and: [
+        { $or: [{ startDate: { $exists: false } }, { startDate: null }, { startDate: { $lte: now } }] },
+        { $or: [{ endDate: { $exists: false } }, { endDate: null }, { endDate: { $gte: now } }] },
+      ],
+    };
+    const items = await Banner.find(showAll ? {} : publicFilter).sort({ order: 1, createdAt: -1 }).lean();
     return Response.json({ items });
   } catch (error) {
     return apiError(error);
@@ -28,8 +51,17 @@ export async function POST(request: Request) {
   try {
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
+    if (parsed.data.startDate && parsed.data.endDate && parsed.data.startDate > parsed.data.endDate) {
+      return Response.json({ error: "End date must be on or after start date" }, { status: 400 });
+    }
     await connectDb();
-    const item = await Banner.create({ ...parsed.data, title: await translated(parsed.data.title), subtitle: await translated(parsed.data.subtitle) });
+    const buttonText = parsed.data.buttonText?.en?.trim() ? { en: parsed.data.buttonText.en.trim(), bn: (parsed.data.buttonText.bn ?? "").trim() } : undefined;
+    const item = await Banner.create({
+      ...parsed.data,
+      ...(buttonText ? { buttonText } : {}),
+      title: await translated(parsed.data.title),
+      subtitle: await translated(parsed.data.subtitle),
+    });
     return Response.json({ item }, { status: 201 });
   } catch (error) {
     return apiError(error);

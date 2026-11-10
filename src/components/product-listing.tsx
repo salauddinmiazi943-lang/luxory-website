@@ -19,6 +19,7 @@ export function ProductListing({ categorySlug }: { categorySlug?: string }) {
   const [min, setMin] = useState("");
   const [max, setMax] = useState("");
   const [sort, setSort] = useState(searchParams.get("sort") === "bestSeller" ? "bestSeller" : "new");
+  const [discounted, setDiscounted] = useState(searchParams.get("discounted") === "true" || searchParams.get("offers") === "true");
   const [page, setPage] = useState(1);
   const [pages, setPages] = useState(1);
   const [total, setTotal] = useState(0);
@@ -40,6 +41,7 @@ export function ProductListing({ categorySlug }: { categorySlug?: string }) {
     const params = new URLSearchParams({ page: String(page), limit: "12" });
     if (query) params.set("q", query);
     if (categoryId) params.set("category", categoryId);
+    if (discounted) params.set("discounted", "true");
     if (min) params.set("min", min);
     if (max) params.set("max", max);
     if (sort === "price_asc" || sort === "price_desc") params.set("sort", sort);
@@ -55,14 +57,14 @@ export function ProductListing({ categorySlug }: { categorySlug?: string }) {
       setPages(result.pages || 1);
       setTotal(result.total || 0);
     }).catch(() => { setProducts([]); setLoadError(true); }).finally(() => setLoading(false));
-  }, [categoryId, categorySlug, categoriesError, categoriesReady, query, min, max, sort, page]);
+  }, [categoryId, categorySlug, categoriesError, categoriesReady, query, min, max, sort, page, discounted]);
   const heading = categorySlug ? categories.find((category) => category.slug === categorySlug)?.name[locale] : t("allProducts");
   return <div className="page-shell">
     <div className="breadcrumb"><Link href="/">{t("home")}</Link>　/　{heading || t("shop")}</div>
     <h1 className="page-title">{heading || t("allProducts")}</h1>
     <div className="split-layout"><aside className="filter-panel"><h3>{t("categoriesFilter")}</h3><Link href="/products">{t("allProducts")}</Link>{categories.map((category) => <Link key={category._id} href={`/category/${category.slug}`}>{category.name[locale] || category.name.en}</Link>)}
       <h3 style={{ marginTop: 22 }}>{t("priceRange")}</h3><div className="form-grid"><div className="field"><label htmlFor="min">{t("from")}</label><input id="min" type="number" min="0" value={min} onChange={(event) => { setPage(1); setMin(event.target.value); }} /></div><div className="field"><label htmlFor="max">{t("to")}</label><input id="max" type="number" min="0" value={max} onChange={(event) => { setPage(1); setMax(event.target.value); }} /></div></div></aside>
-      <section><div className="listing-toolbar"><span>{total} {t("items")}</span><select aria-label="Sort products" value={sort} onChange={(event) => { setPage(1); setSort(event.target.value); }}><option value="new">{t("newest")}</option><option value="bestSeller">{t("bestSellerSort")}</option><option value="price_asc">{t("priceLowHigh")}</option><option value="price_desc">{t("priceHighLow")}</option></select></div>
+      <section><div className="listing-toolbar"><span>{total} {t("items")}</span><div style={{display:"flex",gap:8,flexWrap:"wrap"}}><button type="button" className={`button-secondary${discounted?"":" is-active"}`} style={{padding:"8px 12px"}} onClick={()=>{setPage(1);setDiscounted(false);}}>All</button><button type="button" className={`button-secondary${discounted?" is-active":""}`} style={{padding:"8px 12px"}} onClick={()=>{setPage(1);setDiscounted(true);}}>Offers</button><select aria-label="Sort products" value={sort} onChange={(event) => { setPage(1); setSort(event.target.value); }}><option value="new">{t("newest")}</option><option value="bestSeller">{t("bestSellerSort")}</option><option value="price_asc">{t("priceLowHigh")}</option><option value="price_desc">{t("priceHighLow")}</option></select></div></div>
         {loading ? <p className="subtle">{t("loading")}</p> : loadError ? <div className="form-card"><p>{t("catalogUnavailable")}</p></div> : products.length ? <div className="product-grid listing-grid">{products.map((product, index) => <ProductCard key={product._id ?? product.slug} product={product} index={index} />)}</div> : <div className="form-card"><p>{t("noProducts")}</p></div>}
         {pages > 1 && <div className="listing-toolbar" style={{ justifyContent: "center", gap: 20, marginTop: 30 }}><button className="button-secondary" disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>{t("previous")}</button><span>{t("page")} {page} {t("of")} {pages}</span><button className="button-secondary" disabled={page >= pages} onClick={() => setPage((value) => value + 1)}>{t("next")}</button></div>}
       </section>

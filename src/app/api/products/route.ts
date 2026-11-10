@@ -11,7 +11,12 @@ const productVariant = z.object({
   id: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   label: z.string().trim().min(1).max(60),
   price: z.number().min(0),
+  originalPrice: z.number().min(0).optional(),
   stock: z.number().min(0).max(100_000),
+}).superRefine((v, ctx) => {
+  if (v.originalPrice !== undefined && v.originalPrice > 0 && v.originalPrice <= v.price) {
+    ctx.addIssue({ code: "custom", path: ["originalPrice"], message: "Original price must be greater than current price" });
+  }
 });
 const productInput = z.object({
   title: localeText, description: localeText, price: z.number().min(0), discountPrice: z.number().min(0).optional(),
@@ -28,8 +33,9 @@ const productInput = z.object({
     if (value.discountPrice !== undefined) context.addIssue({ code: "custom", path: ["discountPrice"], message: "Set prices on each variant instead of a product discount" });
     const labels = value.variants.map((variant) => variant.label.toLowerCase());
     if (new Set(labels).size !== labels.length) context.addIssue({ code: "custom", path: ["variants"], message: "Variant labels must be unique" });
-    if (value.price !== Math.min(...value.variants.map((variant) => variant.price))) {
-      context.addIssue({ code: "custom", path: ["price"], message: "Product price must match its lowest-priced variant" });
+    const lowest = Math.min(...value.variants.map((variant) => variant.price));
+    if (value.price !== lowest) {
+      context.addIssue({ code: "custom", path: ["price"], message: "Product price must match its lowest current variant price" });
     }
     if (value.stock !== value.variants.reduce((total, variant) => total + variant.stock, 0)) {
       context.addIssue({ code: "custom", path: ["stock"], message: "Product stock must equal the total stock of its variants" });
@@ -75,6 +81,16 @@ export async function GET(request: Request) {
     }
     if (url.searchParams.get("featured") === "true") filter.featured = true;
     if (url.searchParams.get("bestSeller") === "true") filter.bestSeller = true;
+    const discountedParam = url.searchParams.get("discounted") === "true" || url.searchParams.get("offers") === "true";
+    if (discountedParam) {
+      // Valid discounts only: simple sale (discountPrice < price) OR any variant with originalPrice > current price.
+      // Legacy-compatible and additive; does not modify data.
+      filter.$or = [
+        { $and: [{ discountPrice: { $gt: 0 } }, { $expr: { $lt: ["$discountPrice", "$price"] } }] },
+        { variants: { $elemMatch: { originalPrice: { $gt: 0 }, $expr: { $lt: ["$price", "$originalPrice"] } } } },
+        { $expr: { $gt: [{ $size: { $filter: { input: { $ifNull: ["$variants", []] }, as: "v", cond: { $and: [{ $gt: ["$v.originalPrice", 0] }, { $lt: ["$v.price", "$v.originalPrice"] }] } } } }, 0] } },
+      ];
+    }
     const search = url.searchParams.get("q")?.trim().slice(0, 100);
     if (search) filter.$text = { $search: search };
     const minParam = url.searchParams.get("min");
@@ -115,7 +131,7 @@ export async function POST(request: Request) {
     const description = await translated(parsed.data.description);
     const slugBase = slugify(title.en) || `product-${Date.now()}`;
     const created = await Product.create({
-      ...parsed.data, variants: parsed.data.variants.map((variant) => ({ label: variant.label, price: variant.price, stock: variant.stock })),
+      ...parsed.data, variants: parsed.data.variants.map((variant) => ({ label: variant.label, price: variant.price, ...(variant.originalPrice && variant.originalPrice > variant.price ? { originalPrice: variant.originalPrice } : {}), stock: variant.stock })),
       title, description, slug: `${slugBase}-${Date.now().toString(36)}`,
       vendor: result.user.role === "vendor" ? result.user.id : parsed.data.vendor,
       approved: result.user.role !== "vendor" || process.env.VENDOR_PRODUCTS_REQUIRE_APPROVAL === "false",

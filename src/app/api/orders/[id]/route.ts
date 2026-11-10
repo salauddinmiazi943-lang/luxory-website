@@ -3,17 +3,51 @@ import { connectDb } from "@/lib/db";
 import { Order, Product } from "@/lib/models";
 import { hasPermission, requireUser } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
+import { createDeliveryAuditEntry } from "@/lib/delivery-audit";
+import { aggregateOrderStatus } from "@/lib/order-status";
+import { verifyDeliveryAccessKey } from "@/lib/delivery-security";
 
-const schema = z.object({ status: z.enum(["pending", "confirmed", "shipped", "delivered", "cancelled"]) });
+const schema = z.object({
+  status: z.enum(["pending", "confirmed", "shipped", "delivered", "cancelled"]),
+  notes: z.string().trim().max(1000).optional(),
+  notifyCustomer: z.boolean().optional(),
+});
 const transitions: Record<string, string[]> = {
   pending: ["confirmed", "cancelled"],
   confirmed: ["shipped", "cancelled"],
-  shipped: ["delivered", "cancelled"],
+  shipped: ["cancelled"],
   delivered: [],
   cancelled: [],
 };
-const canTransition = (current: string, next: string) => current === next || transitions[current]?.includes(next);
+const canTransition = (current: string, next: string) => transitions[current]?.includes(next) ?? false;
 type Context = { params: Promise<{ id: string }> };
+
+export async function GET(request: Request, { params }: Context) {
+  const { id } = await params;
+  if (!/^[a-f\\d]{24}$/i.test(id)) return Response.json({ error: "Invalid order id" }, { status: 400 });
+  try {
+    await connectDb();
+    const accessKey = new URL(request.url).searchParams.get("accessKey") ?? "";
+    const order = await Order.findById(id).select(accessKey ? "+delivery.accessKeyHash" : "").lean();
+    if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
+    const access = await requireUser(["super_admin","admin","vendor","customer"]).catch(() => null);
+    const user = access && !("error" in access) ? access.user : null;
+    const admin = user && (user.role === "super_admin" || (user.role === "admin" && hasPermission(user, "manage_bookings")));
+    const customerOwner = user?.role === "customer" && (String(order.customer ?? "") === user.id || Boolean(order.customerInfo?.email && order.customerInfo.email.toLowerCase() === user.email.toLowerCase()));
+    const vendorOwner = user?.role === "vendor" && order.items.some((item) => String(item.vendorId ?? "") === user.id);
+    const guestOwner = !order.customer && accessKey && verifyDeliveryAccessKey(accessKey, order.delivery?.accessKeyHash);
+    if (!admin && !customerOwner && !vendorOwner && !guestOwner) return Response.json({ error: "Order not found" }, { status: 404 });
+    const safe = {
+      _id: String(order._id), status: order.status, subtotal: order.subtotal, deliveryCharge: order.deliveryCharge, total: order.total, paymentMethod: order.paymentMethod, createdAt: (order as { createdAt?: Date }).createdAt,
+      items: order.items.map((item) => ({ title: item.title, variantLabel: item.variantLabel, unit: item.unit, quantity: item.quantity, originalPrice: item.originalPrice, unitPrice: item.unitPrice, discountPercent: item.discountPercent, lineTotal: item.lineTotal, status: item.status })),
+      customerInfo: order.customerInfo ? { name: order.customerInfo.name, phone: order.customerInfo.phone, division: order.customerInfo.division, district: order.customerInfo.district, upazila: order.customerInfo.upazila, union: order.customerInfo.union, area: order.customerInfo.area, address: order.customerInfo.address } : undefined,
+    };
+    return Response.json({ item: safe });
+  } catch (error) {
+    return apiError(error);
+  }
+}
+
 
 export async function PATCH(request: Request, { params }: Context) {
   const access = await requireUser(["super_admin", "admin", "vendor"]);
@@ -23,11 +57,15 @@ export async function PATCH(request: Request, { params }: Context) {
   try {
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
+    if (parsed.data.status === "delivered") {
+      return Response.json({ error: "Use the delivery action to record a delivered order." }, { status: 409 });
+    }
     const { id } = await params;
-    if (!/^[a-f\d]{24}$/i.test(id)) return Response.json({ error: "Invalid order id" }, { status: 400 });
+    if (!/^[a-f\\d]{24}$/i.test(id)) return Response.json({ error: "Invalid order id" }, { status: 400 });
     await connectDb();
     const order = await Order.findById(id);
     if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
+    const previousStatus = order.status;
     const restock: { productId: string; variantId?: string; quantity: number }[] = [];
     if (admin) {
       if (order.items.some((item) => !canTransition(item.status, parsed.data.status))) {
@@ -50,8 +88,15 @@ export async function PATCH(request: Request, { params }: Context) {
       }
       if (!updated) return Response.json({ error: "No eligible items found for this status change" }, { status: 409 });
       const statuses = order.items.map((item) => item.status);
-      order.status = statuses.every((status) => status === statuses[0]) ? statuses[0] : "confirmed";
+      order.status = aggregateOrderStatus(statuses);
     }
+    order.deliveryAudit.push(createDeliveryAuditEntry(
+      id,
+      order.deliveryAudit.at(-1)?.hash ?? "",
+      { id: access.user.id, role: access.user.role },
+      "status_changed",
+      `${previousStatus} -> ${order.status}; actor ${access.user.id}`,
+    ));
     await order.save();
     await Promise.all(restock.map((item) => Product.updateOne(
       { _id: item.productId },
@@ -60,6 +105,9 @@ export async function PATCH(request: Request, { params }: Context) {
     )));
     return Response.json({ item: order });
   } catch (error) {
+    if (error instanceof Error && error.name === "VersionError") {
+      return Response.json({ error: "This order changed at the same time. Refresh and try again." }, { status: 409 });
+    }
     return apiError(error);
   }
 }

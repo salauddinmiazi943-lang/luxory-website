@@ -11,7 +11,12 @@ const productVariant = z.object({
   id: z.string().regex(/^[a-f\d]{24}$/i).optional(),
   label: z.string().trim().min(1).max(60),
   price: z.number().min(0),
+  originalPrice: z.number().min(0).optional(),
   stock: z.number().min(0).max(100_000),
+}).superRefine((v, ctx) => {
+  if (v.originalPrice !== undefined && v.originalPrice > 0 && v.originalPrice <= v.price) {
+    ctx.addIssue({ code: "custom", path: ["originalPrice"], message: "Original price must be greater than current price" });
+  }
 });
 const productInput = z.object({
   title: localeText.optional(), description: localeText.optional(), price: z.number().min(0).optional(),
@@ -22,7 +27,7 @@ const productInput = z.object({
   active: z.boolean().optional(), approved: z.boolean().optional(), featured: z.boolean().optional(), bestSeller: z.boolean().optional(),
 });
 type Context = { params: Promise<{ id: string }> };
-type ProductVariantRecord = { label: string; price: number; stock: number; _id?: mongoose.Types.ObjectId };
+type ProductVariantRecord = { label: string; price: number; originalPrice?: number; stock: number; _id?: mongoose.Types.ObjectId };
 
 export async function GET(_request: Request, { params }: Context) {
   try {
@@ -97,7 +102,7 @@ export async function PATCH(request: Request, { params }: Context) {
         const currentVariantIds = new Map(currentVariants.map((variant) => [variant.label.trim().toLowerCase(), variant._id]));
         changes.variants = parsed.data.variants.map(({ id, ...variant }) => {
           const currentId = id ?? currentVariantIds.get(variant.label.trim().toLowerCase());
-          return { ...variant, ...(currentId ? { _id: currentId } : {}) };
+          return { ...variant, ...(variant.originalPrice && variant.originalPrice > variant.price ? { originalPrice: variant.originalPrice } : {}), ...(currentId ? { _id: currentId } : {}) };
         });
       }
       changes.price = nextPrice;
