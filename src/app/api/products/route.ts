@@ -20,6 +20,8 @@ const productVariant = z.object({
 });
 const productInput = z.object({
   title: localeText, description: localeText, price: z.number().min(0), discountPrice: z.number().min(0).optional(),
+  resellerPrice: z.number().min(0).optional(), wholesalerPrice: z.number().min(0).optional(),
+  resellerMoq: z.number().min(0.01).max(100_000).optional(), wholesalerMoq: z.number().min(0.01).max(100_000).optional(),
   stock: z.number().min(0).max(100_000), unit: z.enum(productUnits).default("piece"),
   variants: z.array(productVariant).max(30).default([]),
   category: z.string().regex(/^[a-f\d]{24}$/i), images: z.array(cloudinaryUrl()).max(12).default([]),
@@ -86,8 +88,7 @@ export async function GET(request: Request) {
       // Valid discounts only: simple sale (discountPrice < price) OR any variant with originalPrice > current price.
       // Legacy-compatible and additive; does not modify data.
       filter.$or = [
-        { $and: [{ discountPrice: { $gt: 0 } }, { $expr: { $lt: ["$discountPrice", "$price"] } }] },
-        { variants: { $elemMatch: { originalPrice: { $gt: 0 }, $expr: { $lt: ["$price", "$originalPrice"] } } } },
+        { $expr: { $and: [{ $gt: ["$discountPrice", 0] }, { $lt: ["$discountPrice", "$price"] }] } },
         { $expr: { $gt: [{ $size: { $filter: { input: { $ifNull: ["$variants", []] }, as: "v", cond: { $and: [{ $gt: ["$v.originalPrice", 0] }, { $lt: ["$v.price", "$v.originalPrice"] }] } } } }, 0] } },
       ];
     }

@@ -113,11 +113,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!syncCart || !cartReady) return;
     const timer = window.setTimeout(async () => {
+      // শুধু লগইন করা কাস্টমার গুলো কার্ট সার্ভারে সেভ করবে; অন্য রোল বা অনলাইন নেই ইউজার এর জন্য চুপচাপ বের হয়ে যাই।
+      const authResponse = await fetch("/api/auth/me");
+      if (!authResponse.ok) return;
+      const auth = await authResponse.json() as { user?: { role?: string } | null };
+      if (!auth.user || auth.user.role !== "customer") return;
+
       const response = await fetch("/api/cart", {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: cart.map((item) => ({ productId: item.id, ...(item.variantId ? { variantId: item.variantId } : {}), quantity: item.quantity })) }),
       });
-      if (!response.ok) console.error("Could not save your cart to your account.");
+      if (!response.ok) {
+        // 401/403 আশা করা একটি Situation (ইউজার লগইন নেই বা কাস্টমার নেই)—লাল Console Error ওভারলে দেখাই না।
+        if (response.status === 401 || response.status === 403) return;
+        console.warn("Could not save your cart to your account.");
+      }
     }, 350);
     return () => window.clearTimeout(timer);
   }, [cart, cartReady, syncCart]);

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NextResponse } from "next/server";
 
 const rateBuckets = new Map<string, { count: number; reset: number }>();
 export function rateLimit(key: string, limit = 8, windowMs = 60_000) {
@@ -26,10 +27,10 @@ export async function readJson<T>(request: Request, schema: z.ZodType<T>) {
   try {
     body = await request.json();
   } catch {
-    return { error: Response.json({ error: "Request body must be valid JSON" }, { status: 400 }) } as const;
+    return { error: NextResponse.json({ error: "Request body must be valid JSON" }, { status: 400 }) } as const;
   }
   const parsed = schema.safeParse(body);
-  if (!parsed.success) return { error: Response.json({ error: "Invalid request", details: parsed.error.flatten() }, { status: 400 }) } as const;
+  if (!parsed.success) return { error: NextResponse.json({ error: "Invalid request", details: parsed.error.flatten() }, { status: 400 }) } as const;
   return { data: parsed.data } as const;
 }
 
@@ -86,16 +87,16 @@ export async function translated(input: { en: string; bn?: string }) {
 
 export function apiError(error: unknown) {
   if (error instanceof Error && error.message === "MONGODB_URI or both MONGO_USER and MONGO_PASS must be configured") {
-    return Response.json({ error: "Database is not configured" }, { status: 503 });
+    return NextResponse.json({ error: "Database is not configured" }, { status: 503 });
   }
   if (error instanceof Error && (("code" in error && error.code === "ECONNREFUSED") || error.message.includes("querySrv ECONNREFUSED"))) {
     console.error("MongoDB connection failed; check DNS, network access, and Atlas availability.");
-    return Response.json({ error: "Database is temporarily unavailable" }, { status: 503 });
+    return NextResponse.json({ error: "Database is temporarily unavailable" }, { status: 503 });
   }
   if (error instanceof Error && (("code" in error && error.code === 18) || error.message.includes("bad auth"))) {
     console.error("MongoDB authentication failed; check the configured database credentials.");
-    return Response.json({ error: "Database credentials are invalid" }, { status: 503 });
+    return NextResponse.json({ error: "Database credentials are invalid" }, { status: 503 });
   }
   console.error(error);
-  return Response.json({ error: "Internal server error" }, { status: 500 });
+  return NextResponse.json({ error: "Internal server error" }, { status: 500 });
 }

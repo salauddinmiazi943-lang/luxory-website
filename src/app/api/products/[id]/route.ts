@@ -20,7 +20,9 @@ const productVariant = z.object({
 });
 const productInput = z.object({
   title: localeText.optional(), description: localeText.optional(), price: z.number().min(0).optional(),
-  discountPrice: z.number().min(0).nullable().optional(), stock: z.number().min(0).max(100_000).optional(),
+  discountPrice: z.number().min(0).nullable().optional(), resellerPrice: z.number().min(0).nullable().optional(), wholesalerPrice: z.number().min(0).nullable().optional(),
+  resellerMoq: z.number().min(0.01).max(100_000).nullable().optional(), wholesalerMoq: z.number().min(0.01).max(100_000).nullable().optional(),
+  stock: z.number().min(0).max(100_000).optional(),
   unit: z.enum(productUnits).optional(), variants: z.array(productVariant).max(30).optional(),
   category: z.string().regex(/^[a-f\d]{24}$/i).optional(), images: z.array(cloudinaryUrl()).max(12).optional(),
   vendor: z.string().regex(/^[a-f\d]{24}$/i).nullable().optional(),

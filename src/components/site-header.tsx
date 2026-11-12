@@ -28,7 +28,7 @@ export function SiteHeader() {
       </div>
       <nav className={`nav-bar ${menuOpen ? "nav-open" : ""}`}><div className="wrap nav-inner">
         <Link className="nav-category" href="/products"><Menu size={16} />{t("allCategories")}<ChevronDown size={14} /></Link>
-        <Link href="/products">{t("products")}</Link><Link href="/blog">{t("blog")}</Link><Link href="/products?sort=bestSeller">{t("bestSeller")}</Link><Link href="/products?sort=new">{t("newArrival")}</Link><Link href="/vendor-application">{t("applyVendor")}</Link><Link href="/contact">{t("contact")}</Link>
+        <Link href="/products">{t("products")}</Link><Link href="/blog">{t("blog")}</Link><Link href="/products?sort=bestSeller">{t("bestSeller")}</Link><Link href="/products?sort=new">{t("newArrival")}</Link><Link href="/vendor-application">{t("applyVendor")}</Link><Link href="/business-application">Reseller/Wholesaler</Link><Link href="/contact">{t("contact")}</Link>
       </div></nav>
     </header>
   );

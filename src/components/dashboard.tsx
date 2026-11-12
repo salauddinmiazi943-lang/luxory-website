@@ -103,7 +103,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     if (!user) return [];
     if (user.role === "vendor") return ["Overview", "My products", "My bookings", "Profile"];
     const choices: [string, string][] = [["Categories", "manage_categories"], ["Banners", "manage_banners"], ["Products", "manage_products"], ["Product comments", "manage_products"], ["Featured products", "manage_featured"], ["Offers", "manage_offers"], ["Announcements", "manage_announcements"], ["Bookings", "view_bookings"], ["Delivery staff", "manage_delivery_staff"], ["Vendor applications", "manage_vendors"], ["Messages", "view_messages"]];
-    return ["Overview", ...choices.filter(([, permission]) => can(permission)).map(([label]) => label), ...(user.role === "super_admin" ? ["Admin users"] : []), "Profile"];
+    return ["Overview", ...choices.filter(([, permission]) => can(permission)).map(([label]) => label), ...(user.role === "super_admin" ? ["Admin users", "Coin & Reward Settings", "Rewards & Vouchers Monitor"] : []), ...((user.role === "super_admin" || user.role === "admin") ? ["হিসাব-নিকাশ"] : []), "Profile"];
   }, [user, can]);
 
   const load = useCallback(async (target: string) => {
@@ -112,13 +112,15 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       if (target === "Overview") {
         if (kind === "admin") {
           const response = await fetchDashboard("/api/admin/summary");
-          const data = await response.json() as Record<string, number> & { error?: string };
-          if (!response.ok) throw new Error(data.error || "Could not load dashboard");
-          setCounts(data);
+          const text = await response.text(); let data: Record<string, number> & { error?: string } = {};
+          try { data = text ? JSON.parse(text) : {}; } catch { throw new Error("Server returned an invalid response (summary)."); }
+          if (!response.ok) throw new Error((data as any).error || "Could not load dashboard");
+          setCounts(data as any);
         } else {
           const [products, orders] = await Promise.all([fetchDashboard("/api/products?limit=1"), fetchDashboard("/api/orders")]);
-          const productData = await products.json() as { total?: number };
-          const orderData = await orders.json() as { items?: Item[] };
+          let productData: any = {}; let orderData: any = {};
+          try { productData = JSON.parse(await products.text() || "{}"); } catch { productData = {}; }
+          try { orderData = JSON.parse(await orders.text() || "{}"); } catch { orderData = {}; }
           setCounts({ products: productData.total ?? 0, bookings: orderData.items?.length ?? 0 });
         }
         setItems([]);
@@ -127,7 +129,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       if (target === "Profile") { setItems([]); return; }
       if (target === "Categories") {
         const response = await fetchDashboard("/api/categories?all=true");
-        const data = await response.json() as { items?: Category[]; error?: string };
+        const text = await response.text(); let data: any = {};
+        try { data = text ? JSON.parse(text) : {}; } catch { throw new Error("Server returned an invalid response (categories)."); }
         if (!response.ok) throw new Error(data.error || "Could not load categories");
         setCategories(data.items ?? []); setItems(data.items as unknown as Item[] ?? []); return;
       }
@@ -140,13 +143,14 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
         "Product comments": "/api/admin/product-comments",
       };
       const response = await fetchDashboard(endpoints[target] ?? "");
-      const data = await response.json() as { items?: Item[]; error?: string };
+      const _safeText_data = await response.text(); let data: { items?: Item[]; error?: string } = {};
+      try { data = _safeText_data ? JSON.parse(_safeText_data) : {}; } catch { data = { error: _safeText_data?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok) throw new Error(data.error || "Could not load this section");
       setItems(data.items ?? []);
       if (target === "Products" || target === "My products") {
         const [categoriesResponse, vendorsResponse] = await Promise.all([fetchDashboard("/api/categories"), fetchDashboard("/api/admin/vendors")]);
-        if (categoriesResponse.ok) setCategories((await categoriesResponse.json() as { items?: Category[] }).items ?? []);
-        if (vendorsResponse.ok) setVendors((await vendorsResponse.json() as { items?: VendorOption[] }).items ?? []);
+        try { if (categoriesResponse.ok) { const ct = await categoriesResponse.text(); setCategories((ct ? JSON.parse(ct) : {}).items ?? []); } } catch {}
+        try { if (vendorsResponse && vendorsResponse.ok) { const vt = await vendorsResponse.text(); setVendors((vt ? JSON.parse(vt) : {}).items ?? []); } } catch {}
       }
     } catch (reason) {
       setItems([]);
@@ -167,7 +171,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     async function verifyAccess() {
       try {
         const response = await fetchDashboard("/api/auth/me");
-        const data = await response.json() as { user?: UserInfo; error?: string };
+        const _safeText_data = await response.text(); let data: { user?: UserInfo; error?: string } = {};
+        try { data = _safeText_data ? JSON.parse(_safeText_data) : {}; } catch { data = { error: _safeText_data?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
         if (response.status === 401 || !data.user) {
           router.replace(kind === "admin" ? "/admin/login" : "/account");
           return;
@@ -243,6 +248,10 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
           stock: hasVariants ? stocks.reduce((total, stock) => total + stock, 0) : Number(form.get("stock")),
           unit, variants, category: form.get("category"), images,
           vendor: form.get("vendor") || undefined, active: form.get("active") === "on", featured: form.get("featured") === "on",
+          ...(String(form.get("resellerPrice") || "").trim() ? { resellerPrice: Number(form.get("resellerPrice")) } : {}),
+          ...(String(form.get("wholesalerPrice") || "").trim() ? { wholesalerPrice: Number(form.get("wholesalerPrice")) } : {}),
+          ...(String(form.get("resellerMoq") || "").trim() ? { resellerMoq: Number(form.get("resellerMoq")) } : {}),
+          ...(String(form.get("wholesalerMoq") || "").trim() ? { wholesalerMoq: Number(form.get("wholesalerMoq")) } : {}),
         };
       } else if (tab === "Admin users") {
         endpoint = "/api/admin/users";
@@ -261,10 +270,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
         return;
       }
       const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      const result = await response.json() as {
-        error?: string;
-        details?: { fieldErrors?: Record<string, string[]>; formErrors?: string[] };
-      };
+      const _safeText_result = await response.text(); let result: { error?: string; details?: { fieldErrors?: Record<string, string[]>; formErrors?: string[] } } = {};
+      try { result = _safeText_result ? JSON.parse(_safeText_result) : {}; } catch { result = { error: _safeText_result?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok) {
         const details = result.details;
         const validationErrors = [
@@ -327,7 +334,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     setError(""); setNotice("");
     try {
       const response = await fetch(url, { method, ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-      const result = await response.json() as { error?: string; temporaryPassword?: string };
+      const _safeText_result = await response.text(); let result: { error?: string; temporaryPassword?: string } = {};
+      try { result = _safeText_result ? JSON.parse(_safeText_result) : {}; } catch { result = { error: _safeText_result?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok) throw new Error(result.error || "Could not update");
       await load(tab);
       setNotice(result.temporaryPassword ? `Vendor approved. Share this temporary password securely: ${result.temporaryPassword}` : "Updated successfully.");
@@ -363,38 +371,6 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
   return <div className="page-shell dashboard-page">
     <header className="dashboard-heading">
       <div>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
-          <Link 
-            href="/" 
-            onClick={(e) => { 
-              e.preventDefault(); 
-              if (typeof (window as unknown as { nav?: (p: string) => void }).nav === "function") {
-                (window as unknown as { nav: (p: string) => void }).nav("/");
-              } else {
-                router.push("/");
-              }
-            }} 
-            className="brand" 
-            aria-label="Luxora Global Trade"
-          >
-            <img src="/images/luxora-logo.jpg" alt="Luxora Global Trade" className="brand-logo" style={{ height: 38, width: "auto" }} />
-          </Link>
-          <button
-            type="button"
-            onClick={() => {
-              if (typeof (window as unknown as { nav?: (p: string) => void }).nav === "function") {
-                (window as unknown as { nav: (p: string) => void }).nav("/");
-              } else {
-                router.push("/");
-              }
-            }}
-            className="button-secondary"
-            style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, padding: "6px 14px", cursor: "pointer" }}
-            title="Navigate back to homepage using nav('/')"
-          >
-            <Home size={15} /> Home
-          </button>
-        </div>
         <p className="eyebrow">ESHOP WORKSPACE</p>
         <h1>{title}</h1>
         <p>{kind === "admin" ? "Manage your store, products, and orders in one place." : "Manage your listings, orders, and vendor profile in one place."}</p>
@@ -420,7 +396,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     <div className="dashboard-layout">
       <aside className="dashboard-nav">
         <p className="dashboard-nav-label">WORKSPACE</p>
-        {menu.map((item) => <button type="button" key={item} className={tab === item ? "selected" : ""} onClick={() => setTab(item)}>{item}</button>)}
+        {menu.map((item) => <button type="button" key={item} className={tab === item ? "selected" : ""} onClick={() => item === "হিসাব-নিকাশ" ? router.push("/accounts") : setTab(item)}>{item}</button>)}
         <button type="button" className="dashboard-signout" onClick={async () => { const response = await fetch("/api/auth/logout", { method: "POST" }); if (!response.ok) { setError("Could not sign out. Please try again."); return; } window.dispatchEvent(new Event("eshop:auth-changed")); router.replace("/account"); }}>Sign out</button>
       </aside>
       <section className="dashboard-card">
@@ -428,6 +404,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
         {error && <p className="form-error">{error}</p>}{notice && <p className="form-success">{notice}</p>}
         {loading ? <p className="subtle">Loading…</p> : tab === "Overview" ? <div className="stat-grid">{Object.entries(counts).map(([key, value]) => <div className="stat-card" key={key}><span>{key.replace(/[A-Z]/g, (letter) => ` ${letter}`).replace(/^./, (letter) => letter.toUpperCase())}</span><strong>{value}</strong></div>)}</div>
           : tab === "Profile" ? user?.role === "vendor" ? <VendorProfile /> : <div><p><strong>{user?.name}</strong></p><p>{user?.email}</p><p className="subtle">Role: {user?.role}</p></div>
+          : tab === "Coin & Reward Settings" ? <CoinRewardSettingsPanel />
+          : tab === "Rewards & Vouchers Monitor" ? <RewardsVouchersMonitor />
           : <>
             {["Categories", "Banners", "Products", "My products", "Admin users", "Delivery staff"].includes(tab) && <form className="admin-form" onSubmit={submitForm}>
               {tab === "Categories" && <>
@@ -480,6 +458,8 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
                 {productVariants.length === 0 ? <>
                   <div className="wide unit-options-toggle"><span>Need sizes or pack options? Add size / volume options with separate prices and stock.</span><button type="button" className="button-secondary" onClick={() => setProductVariants([{ label: "", price: "", stock: "" }])}>Add size / volume options</button></div>
                   <div className="field"><label>Regular price per {unitLabel(productUnit)} (৳)</label><input name="price" type="number" min="0" step="0.01" required /></div><div className="field"><label>Sale price per {unitLabel(productUnit)} (৳, optional)</label><input name="discountPrice" type="number" min="0" step="0.01" /></div>
+                  <div className="field"><label>Reseller price per {unitLabel(productUnit)} (৳, optional)</label><input name="resellerPrice" type="number" min="0" step="0.01" /></div><div className="field"><label>Reseller MOQ ({unitLabel(productUnit)})</label><input name="resellerMoq" type="number" min="0.01" step={quantityStep(productUnit)} defaultValue="1" /></div>
+                  <div className="field"><label>Wholesaler price per {unitLabel(productUnit)} (৳, optional)</label><input name="wholesalerPrice" type="number" min="0" step="0.01" /></div><div className="field"><label>Wholesaler MOQ ({unitLabel(productUnit)})</label><input name="wholesalerMoq" type="number" min="0.01" step={quantityStep(productUnit)} defaultValue="1" /></div>
                   <div className="field"><label>Stock ({unitLabel(productUnit)})</label><input name="stock" type="number" min="0" step={quantityStep(productUnit)} required /></div>
                 </> : <div className="wide product-variants-field">
                   <div className="product-variants-heading"><div><strong>Size / volume options</strong><small>Set a separate price and available stock for each option. The selected category filled in suggested options.</small></div><button type="button" className="button-secondary" onClick={() => setProductVariants((current) => [...current, { label: "", price: "", stock: "" }])}>Add option</button></div>
@@ -523,7 +503,8 @@ function VendorProfile() {
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     fetch("/api/vendor/profile").then(async (response) => {
-      const result = await response.json() as { profile?: typeof profile; error?: string };
+      const _safeText_result = await response.text(); let result: { profile?: typeof profile; error?: string } = {};
+      try { result = _safeText_result ? JSON.parse(_safeText_result) : {}; } catch { result = { error: _safeText_result?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok || !result.profile) throw new Error(result.error || "Could not load profile");
       setProfile({ name: result.profile.name, email: result.profile.email, shopName: result.profile.shopName ?? "", phone: result.profile.phone ?? "", address: result.profile.address ?? "" });
     }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : "Could not load profile"));
@@ -536,7 +517,8 @@ function VendorProfile() {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name: form.get("name"), phone: form.get("phone"), address: form.get("address") }),
       });
-      const result = await response.json() as { profile?: typeof profile; error?: string };
+      const _safeText_result = await response.text(); let result: { profile?: typeof profile; error?: string } = {};
+      try { result = _safeText_result ? JSON.parse(_safeText_result) : {}; } catch { result = { error: _safeText_result?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok || !result.profile) throw new Error(result.error || "Could not update profile");
       setProfile({ name: result.profile.name, email: result.profile.email, shopName: result.profile.shopName ?? "", phone: result.profile.phone ?? "", address: result.profile.address ?? "" });
       setNotice("Profile saved.");
@@ -550,6 +532,109 @@ function VendorProfile() {
     <div className="field"><label htmlFor="vendor-phone">Phone</label><input id="vendor-phone" name="phone" value={profile.phone} onChange={(event) => setProfile((current) => ({ ...current, phone: event.target.value }))} required minLength={6} maxLength={30} /></div>
     <div className="field"><label htmlFor="vendor-address">Address</label><textarea id="vendor-address" name="address" value={profile.address} onChange={(event) => setProfile((current) => ({ ...current, address: event.target.value }))} required minLength={5} maxLength={1000} /></div>
     <button className="button-primary" disabled={busy}>{busy ? "Saving…" : "Save profile"}</button>
+  </form>;
+}
+
+type CoinRewardForm = {
+  coinEarning: { retailPer1000: number; resellerPer1000: number; wholesalerPer1000: number };
+  coinRedemption: { coins: number; bdt: number; minRedeemCoins: number };
+  voucher: { purchaseThreshold: number; voucherAmount: number; expiryDays: number; minOrderAmount: number };
+  toggles: { rewardSystemEnabled: boolean; coinUsageEnabled: boolean; voucherSystemEnabled: boolean };
+};
+const coinRewardDefaults: CoinRewardForm = {
+  coinEarning: { retailPer1000: 3, resellerPer1000: 3, wholesalerPer1000: 3 },
+  coinRedemption: { coins: 100, bdt: 5, minRedeemCoins: 500 },
+  voucher: { purchaseThreshold: 50000, voucherAmount: 500, expiryDays: 30, minOrderAmount: 0 },
+  toggles: { rewardSystemEnabled: false, coinUsageEnabled: false, voucherSystemEnabled: false },
+};
+
+function CoinRewardSettingsPanel() {
+  const [form, setForm] = useState<CoinRewardForm>(coinRewardDefaults);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    fetch("/api/admin/coin-reward-settings")
+      .then(async (response) => {
+        const text = await response.text();
+        let data: any = {};
+        try { data = text ? JSON.parse(text) : {}; } catch { throw new Error(text?.startsWith("<") ? "Server returned an invalid response. Please refresh or restart the dev server." : "Invalid server response"); }
+        if (!response.ok) throw new Error(data?.error || "Could not load coin & reward settings");
+        if (active) setForm({
+          coinEarning: { ...coinRewardDefaults.coinEarning, ...(data.coinEarning ?? {}) },
+          coinRedemption: { ...coinRewardDefaults.coinRedemption, ...(data.coinRedemption ?? {}) },
+          voucher: { ...coinRewardDefaults.voucher, ...(data.voucher ?? {}) },
+          toggles: { ...coinRewardDefaults.toggles, ...(data.toggles ?? {}) },
+        });
+      })
+      .catch((reason: unknown) => { if (active) setError(reason instanceof Error ? reason.message : "Could not load settings"); })
+      .finally(() => { if (active) setLoading(false); });
+    return () => { active = false; };
+  }, []);
+
+  function validate(v: CoinRewardForm) {
+    const nums = [v.coinEarning.retailPer1000, v.coinEarning.resellerPer1000, v.coinEarning.wholesalerPer1000, v.coinRedemption.bdt, v.voucher.purchaseThreshold, v.voucher.voucherAmount, v.voucher.minOrderAmount];
+    if (nums.some((n) => !Number.isFinite(n) || n < 0)) return "Rates and amounts must be 0 or greater.";
+    if (!Number.isInteger(v.coinRedemption.coins) || v.coinRedemption.coins < 1) return "Redemption coin value must be an integer of at least 1.";
+    if (!Number.isInteger(v.coinRedemption.minRedeemCoins) || v.coinRedemption.minRedeemCoins < 0) return "Minimum redeem coins must be 0 or greater.";
+    if (!Number.isInteger(v.voucher.expiryDays) || v.voucher.expiryDays < 0) return "Voucher expiry days must be 0 or greater.";
+    return "";
+  }
+
+  async function save(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError(""); setNotice("");
+    const msg = validate(form);
+    if (msg) { setError(msg); return; }
+    setSaving(true);
+    try {
+      const response = await fetch("/api/admin/coin-reward-settings", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) });
+      const text = await response.text();
+      let data: any = {};
+      try { data = text ? JSON.parse(text) : {}; } catch { throw new Error(text?.startsWith("<") ? "Server returned an invalid response. Please refresh or restart the dev server." : "Invalid server response"); }
+      if (!response.ok) throw new Error(data?.error || "Could not save settings");
+      setForm({
+        coinEarning: { ...coinRewardDefaults.coinEarning, ...(data.coinEarning ?? {}) },
+        coinRedemption: { ...coinRewardDefaults.coinRedemption, ...(data.coinRedemption ?? {}) },
+        voucher: { ...coinRewardDefaults.voucher, ...(data.voucher ?? {}) },
+        toggles: { ...coinRewardDefaults.toggles, ...(data.toggles ?? {}) },
+      });
+      setNotice("Coin & Reward settings saved.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not save settings");
+    } finally { setSaving(false); }
+  }
+
+  if (loading) return <p className="subtle">Loading settings…</p>;
+  return <form className="admin-form" onSubmit={save} aria-label="Coin and Reward Settings">
+    {error && <p className="form-error">{error}</p>}{notice && <p className="form-success">{notice}</p>}
+    <h3 style={{ gridColumn: "1 / -1", margin: "4px 0" }}>Global Toggles (চালু/বন্ধ)</h3>
+    <label className="admin-check"><input type="checkbox" checked={form.toggles.rewardSystemEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, rewardSystemEnabled: e.target.checked } })} /> Reward System Enabled</label>
+    <label className="admin-check"><input type="checkbox" checked={form.toggles.coinUsageEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, coinUsageEnabled: e.target.checked } })} /> Coin Usage Enabled</label>
+    <label className="admin-check"><input type="checkbox" checked={form.toggles.voucherSystemEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, voucherSystemEnabled: e.target.checked } })} /> Voucher System Enabled</label>
+
+    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Earning (প্রতি ৳১,০০০ কেনাকাটায় Coin)</h3>
+    <div className="field"><label>Retail (Customer) coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.retailPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, retailPer1000: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Reseller coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.resellerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, resellerPer1000: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Wholesaler coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.wholesalerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, wholesalerPer1000: Number(e.target.value) } })} required /></div>
+
+    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Redemption (Coin ব্যবহার/মূল্য)</h3>
+    <div className="field"><label>Coins (e.g. 100)</label><input type="number" min="1" step="1" value={form.coinRedemption.coins} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, coins: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Equals BDT (e.g. 5)</label><input type="number" min="0" step="0.01" value={form.coinRedemption.bdt} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, bdt: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Minimum coins to redeem</label><input type="number" min="0" step="1" value={form.coinRedemption.minRedeemCoins} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, minRedeemCoins: Number(e.target.value) } })} required /></div>
+    <p className="subtle" style={{ gridColumn: "1 / -1", margin: 0 }}>Example: {form.coinRedemption.coins} Coin = ৳{form.coinRedemption.bdt}; minimum redemption {form.coinRedemption.minRedeemCoins} Coin.</p>
+
+    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Shopping Reward Voucher Rules</h3>
+    <div className="field"><label>Purchase threshold (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.purchaseThreshold} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, purchaseThreshold: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Voucher amount (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.voucherAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, voucherAmount: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Voucher expiry (days)</label><input type="number" min="0" step="1" value={form.voucher.expiryDays} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, expiryDays: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Minimum order amount to use voucher (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.minOrderAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, minOrderAmount: Number(e.target.value) } })} required /></div>
+
+    <div className="wide" style={{ marginTop: 8 }}><button className="button-primary" disabled={saving}>{saving ? "Saving…" : "Save Coin & Reward Settings"}</button></div>
+    <p className="subtle wide" style={{ margin: 0 }}>Note: Settings are stored for future coin/voucher logic. Existing checkout, cart, pricing, and orders are not changed in this phase.</p>
   </form>;
 }
 
@@ -567,12 +652,13 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
     Promise.all([fetch("/api/admin/delivery-settings"), fetch("/api/admin/delivery-staff"), fetch("/api/admin/delivery-assignees")])
       .then(async ([settingsResponse, actorsResponse, assigneesResponse]) => {
         const [settings, staff] = await Promise.all([
-          settingsResponse.json() as Promise<{ auditFrequencyPercent?: number; defaultDeliveryCharge?: number; notifications?: { emailConfigured: boolean; smsConfigured: boolean }; error?: string }>,
-          actorsResponse.json() as Promise<{ items?: DeliveryStaffOption[]; error?: string }>,
+          (async()=>{try{return JSON.parse(await settingsResponse.text()||"{}")}catch{return {error:"Server returned an invalid response."}}})() as Promise<{ auditFrequencyPercent?: number; defaultDeliveryCharge?: number; notifications?: { emailConfigured: boolean; smsConfigured: boolean }; error?: string }>,
+        (async()=>{try{return JSON.parse(await actorsResponse.text()||"{}")}catch{return {error:"Server returned an invalid response."}}})() as Promise<{ items?: DeliveryStaffOption[]; error?: string }>,
         ]);
         if (!settingsResponse.ok) throw new Error(settings.error || "Could not load delivery settings");
         if (!actorsResponse.ok) throw new Error(staff.error || "Could not load delivery actors");
-        const assignees = await assigneesResponse.json() as { items?: DeliveryAssigneeOption[]; error?: string };
+        const _safeText_assignees = await assigneesResponse.text(); let assignees: { items?: DeliveryAssigneeOption[]; error?: string } = {};
+        try { assignees = _safeText_assignees ? JSON.parse(_safeText_assignees) : {}; } catch { assignees = { error: _safeText_assignees?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
         if (!assigneesResponse.ok) throw new Error(assignees.error || "Could not load delivery staff");
         if (!active) return;
         setAuditFrequency(settings.auditFrequencyPercent ?? 0);
@@ -984,7 +1070,7 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
       </div></> : <span className="subtle">View only</span>}</td></tr>;
   })}</tbody></table></>;
   }
-  if (tab === "Vendor applications") return <table className="data-table"><thead><tr><th>Shop / contact</th><th>Details / documents</th><th>Status</th><th>Decision</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td>{String(item.shopName)}<br />{String(item.email)}</td><td>{String(item.name)} · {String(item.phone)}<br />{String(item.address)}<br />{Array.isArray(item.documents) && item.documents.map((document, index) => <a className="inline-button" key={String(document)} href={String(document)} target="_blank" rel="noreferrer">Document {index + 1}</a>)}</td><td>{String(item.status)}</td><td>{item.status === "pending" && <><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "approved" })}>Approve</button><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "rejected" })}>Reject</button></>}</td></tr>)}</tbody></table>;
+  if (tab === "Vendor applications") return <table className="data-table"><thead><tr><th>Type</th><th>Shop / contact</th><th>Details / documents</th><th>Status</th><th>Decision</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td><span className="status-pill">{String((item as Record<string, unknown>).applicationType ?? "vendor")}</span></td><td>{String(item.shopName)}<br />{String(item.email)}</td><td>{String(item.name)} · {String(item.phone)}<br />{String(item.address)}{(item as Record<string, unknown>).tradeLicense ? <><br />Trade license: {String((item as Record<string, unknown>).tradeLicense)}</> : null}<br />{Array.isArray(item.documents) && item.documents.map((document, index) => <a className="inline-button" key={String(document)} href={String(document)} target="_blank" rel="noreferrer">Document {index + 1}</a>)}</td><td>{String(item.status)}</td><td>{item.status === "pending" && <><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "approved" })}>Approve</button><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "rejected" })}>Reject</button></>}</td></tr>)}</tbody></table>;
   if (tab === "Messages") return <table className="data-table"><thead><tr><th>From</th><th>Subject</th><th>Message</th><th>Date</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td>{String(item.name)}<br />{String(item.email)}</td><td>{String(item.subject)}</td><td>{String(item.message)}</td><td>{new Date(String(item.createdAt)).toLocaleDateString()}</td></tr>)}</tbody></table>;
   if (tab === "Admin users") return <table className="data-table"><thead><tr><th>Name</th><th>Email</th><th>Permissions</th><th>Status</th><th>Action</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td>{String(item.name)}</td><td>{String(item.email)}</td><td>{Array.isArray(item.permissions) ? item.permissions.map(String).join(", ") : ""}</td><td>{String(item.status)}</td><td><button className="inline-button" onClick={() => {
     const current = Array.isArray(item.permissions) ? item.permissions.map(String).join(", ") : "";
@@ -1003,4 +1089,82 @@ function localizedName(item: Item) {
 function canMove(current: string, next: string) {
   const transitions: Record<string, string[]> = { pending: ["confirmed", "cancelled"], confirmed: ["shipped", "cancelled"], shipped: ["delivered", "cancelled"], delivered: [], cancelled: [] };
   return transitions[current]?.includes(next) ?? false;
+}
+
+
+function RewardsVouchersMonitor() {
+  const [data, setData] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [form, setForm] = useState({ user: "", action: "add" as "add" | "deduct", coins: 0, description: "" });
+
+  async function load() {
+    setLoading(true); setError("");
+    try {
+      const res = await fetch("/api/admin/rewards-overview");
+      const text = await res.text();
+      let json: any = {};
+      try { json = text ? JSON.parse(text) : {}; } catch { throw new Error(text?.startsWith("<") ? "Server returned an invalid response (rewards overview)." : "Invalid server response"); }
+      if (!res.ok) throw new Error(json.error || "Could not load rewards overview");
+      setData(json);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not load rewards overview"); }
+    finally { setLoading(false); }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function submitAdjust(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault(); setError(""); setNotice("");
+    if (!form.user.trim()) return setError("User email or ID is required.");
+    if (!Number.isInteger(form.coins) || form.coins <= 0) return setError("Coins must be a positive integer.");
+    if (form.description.trim().length < 3) return setError("Description must be at least 3 characters.");
+    setBusy(true);
+    try {
+      const res = await fetch("/api/admin/wallet-adjust", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ user: form.user.trim(), action: form.action, coins: form.coins, description: form.description.trim() }) });
+      const text = await res.text();
+      let json: any = {};
+      try { json = text ? JSON.parse(text) : {}; } catch { throw new Error(text?.startsWith("<") ? "Server returned an invalid response (wallet adjust)." : "Invalid server response"); }
+      if (!res.ok) throw new Error(json.error || "Could not adjust wallet");
+      setNotice(`Wallet updated for ${json.user?.email || form.user}. New balance: ${json.wallet?.balanceCoins ?? 0} coins.`);
+      setForm({ user: "", action: "add", coins: 0, description: "" });
+      await load();
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not adjust wallet"); }
+    finally { setBusy(false); }
+  }
+
+  if (loading) return <div className="dashboard-card"><p className="subtle">Loading rewards overview…</p></div>;
+  return <div className="stack">
+    <div className="dashboard-card stack"><h2>Rewards &amp; Vouchers Monitor</h2><p className="subtle">Super-admin overview of coin circulation, vouchers, and business accounts.</p>
+      {error && <p className="form-error">{error}</p>}{notice && <p style={{ color: "#166534" }}>{notice}</p>}
+      <div className="dashboard-grid">
+        <div className="dashboard-card"><h3>Coins</h3><p><strong>Total earned:</strong> {Number(data?.coins?.totalEarned || 0).toLocaleString("en-BD")}</p><p><strong>Total redeemed:</strong> {Number(data?.coins?.totalRedeemed || 0).toLocaleString("en-BD")}</p><p><strong>Total balance (wallets):</strong> {Number(data?.coins?.totalBalance || 0).toLocaleString("en-BD")}</p></div>
+        <div className="dashboard-card"><h3>Vouchers</h3><p><strong>Active:</strong> {data?.vouchers?.active?.count || 0} (৳{Number(data?.vouchers?.active?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Used:</strong> {data?.vouchers?.used?.count || 0} (৳{Number(data?.vouchers?.used?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Expired:</strong> {data?.vouchers?.expired?.count || 0} (৳{Number(data?.vouchers?.expired?.amount || 0).toLocaleString("en-BD")})</p></div>
+        <div className="dashboard-card"><h3>Business accounts</h3><p><strong>Active resellers:</strong> {data?.roles?.activeResellers || 0}</p><p><strong>Active wholesalers:</strong> {data?.roles?.activeWholesalers || 0}</p></div>
+      </div>
+    </div>
+
+    <div className="dashboard-card stack"><h3>Manual Coin Adjustment</h3><p className="subtle">Adjust a user wallet by email or user ID. Deduction cannot make balance negative. Recorded as admin_adjust.</p>
+      <form className="form-grid" onSubmit={submitAdjust}>
+        <label className="field">User (email or ID)<input value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} required maxLength={254} /></label>
+        <label className="field">Action<select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value as "add" | "deduct" })}><option value="add">Add coins</option><option value="deduct">Deduct coins</option></select></label>
+        <label className="field">Coins<input type="number" min={1} step={1} value={form.coins} onChange={(e) => setForm({ ...form, coins: Math.max(0, Math.floor(Number(e.target.value || 0))) })} required /></label>
+        <label className="field wide">Reason / description<input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} required minLength={3} maxLength={500} /></label>
+        <div className="wide"><button className="button-primary" disabled={busy}>{busy ? "Saving…" : "Apply adjustment"}</button></div>
+      </form>
+    </div>
+
+    <div className="dashboard-card stack"><h3>Recent coin transactions</h3>
+      <div style={{ overflowX: "auto" }}><table className="admin-table"><thead><tr><th>Time</th><th>User</th><th>Type</th><th>Amount</th><th>Description</th></tr></thead><tbody>
+        {(data?.recentTransactions || []).length === 0 ? <tr><td colSpan={5} className="subtle">No transactions.</td></tr> : (data.recentTransactions || []).map((tx: any) => <tr key={tx._id}><td>{tx.createdAt ? new Date(tx.createdAt).toLocaleString() : "-"}</td><td>{tx.user ? `${tx.user.name || ""} (${tx.user.email || ""})` : "-"}</td><td>{tx.type}</td><td style={{ color: tx.amount < 0 ? "#b91c1c" : "#166534" }}>{tx.amount > 0 ? "+" : ""}{tx.amount}</td><td>{tx.description || "-"}</td></tr>)}
+      </tbody></table></div>
+    </div>
+
+    <div className="dashboard-card stack"><h3>Recent issued vouchers</h3>
+      <div style={{ overflowX: "auto" }}><table className="admin-table"><thead><tr><th>Code</th><th>User</th><th>Amount</th><th>Min order</th><th>Status</th><th>Expires</th></tr></thead><tbody>
+        {(data?.recentVouchers || []).length === 0 ? <tr><td colSpan={6} className="subtle">No vouchers.</td></tr> : (data.recentVouchers || []).map((v: any) => <tr key={v._id}><td><strong>{v.voucherCode}</strong></td><td>{v.user ? `${v.user.name || ""} (${v.user.email || ""})` : "-"}</td><td>৳{Number(v.amount || 0).toLocaleString("en-BD")}</td><td>৳{Number(v.minOrderAmount || 0).toLocaleString("en-BD")}</td><td>{v.status}</td><td>{v.expiresAt ? new Date(v.expiresAt).toLocaleDateString() : "-"}</td></tr>)}
+      </tbody></table></div>
+    </div>
+  </div>;
 }

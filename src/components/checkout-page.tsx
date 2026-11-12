@@ -58,6 +58,12 @@ export function CheckoutPage() {
   });
   const [loadedDirectCheckout, setLoadedDirectCheckout] = useState<{ key: string; item?: CartLine; error?: string } | null>(null);
   const [defaultDeliveryCharge, setDefaultDeliveryCharge] = useState(60);
+  const [coinConfig, setCoinConfig] = useState<{ balanceCoins: number; minimumRedeemCoins: number; coinsPer1Taka: number; maxRedeemPercentPerOrder: number; canRedeem: boolean } | null>(null);
+  const [redeemCoins, setRedeemCoins] = useState(0);
+  const [voucherCode, setVoucherCode] = useState("");
+  const [voucherDiscount, setVoucherDiscount] = useState(0);
+  const [voucherStatus, setVoucherStatus] = useState<"" | "checking" | "valid" | "error">("");
+  const [voucherMessage, setVoucherMessage] = useState("");
   const router = useRouter();
   const searchParams = useSearchParams();
   const buyNowProductId = searchParams.get("buyNow");
@@ -89,6 +95,10 @@ export function CheckoutPage() {
       }
     }
     void loadLocations();
+    fetch("/api/checkout/coin-config").then((r) => r.ok ? r.json() : null).then((d: any) => {
+      const cr = d?.settings?.coinRedemption;
+      if (cr) setCoinConfig({ balanceCoins: Number(d?.wallet?.balanceCoins ?? 0), minimumRedeemCoins: cr.minimumRedeemCoins, coinsPer1Taka: cr.coinsPer1Taka, maxRedeemPercentPerOrder: cr.maxRedeemPercentPerOrder, canRedeem: Boolean(d?.canRedeem) });
+    }).catch(() => {});
     fetch("/api/checkout/config").then((r) => r.ok ? r.json() : null).then((d: { defaultDeliveryCharge?: number } | null) => {
       if (active && d && Number.isFinite(d.defaultDeliveryCharge) && (d.defaultDeliveryCharge ?? -1) >= 0) setDefaultDeliveryCharge(Number(d.defaultDeliveryCharge));
     }).catch(() => {});
@@ -186,7 +196,11 @@ export function CheckoutPage() {
   const checkoutItems = directCheckout?.item ? [directCheckout.item] : buyNowProductId ? [] : cart;
   const subtotal = checkoutItems.reduce((sum, line) => sum + line.price * line.quantity, 0);
   const deliveryCharge = defaultDeliveryCharge;
-  const total = subtotal + deliveryCharge;
+  const maxRedeemByPercent = coinConfig?.canRedeem ? Math.floor(((subtotal + deliveryCharge) * (coinConfig.maxRedeemPercentPerOrder / 100)) * coinConfig.coinsPer1Taka) : 0;
+  const effectiveRedeemCoins = coinConfig?.canRedeem ? Math.min(Math.max(0, Math.floor(redeemCoins)), coinConfig.balanceCoins, maxRedeemByPercent) : 0;
+  const coinDiscount = coinConfig?.canRedeem && coinConfig.coinsPer1Taka > 0 ? Number((effectiveRedeemCoins / coinConfig.coinsPer1Taka).toFixed(2)) : 0;
+  const effectiveVoucherDiscount = voucherStatus === "valid" ? Math.min(voucherDiscount, Math.max(0, subtotal + deliveryCharge - coinDiscount)) : 0;
+  const total = Math.max(0, subtotal + deliveryCharge - coinDiscount - effectiveVoucherDiscount);
   function applySavedAddress(address: SavedAddress | undefined) {
     setSavedAddressId(address?._id ?? "");
     setSelectedDivisionId(address?.divisionId ?? "");
@@ -201,6 +215,18 @@ export function CheckoutPage() {
       address: address?.address ?? "",
       label: address?.label ?? "",
     });
+  }
+
+  async function applyVoucher() {
+    const code = voucherCode.trim();
+    if (!code) return;
+    setVoucherStatus("checking"); setVoucherMessage(""); setVoucherDiscount(0);
+    try {
+      const res = await fetch("/api/checkout/voucher-validate", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ voucherCode: code, payableAmount: Math.max(0, subtotal + deliveryCharge - coinDiscount) }) });
+      const data = await res.json() as { ok?: boolean; error?: string; voucher?: { discountBdt: number } };
+      if (!res.ok || !data.ok || !data.voucher) { setVoucherStatus("error"); setVoucherDiscount(0); setVoucherMessage(data.error || "Voucher could not be applied."); }
+      else { setVoucherStatus("valid"); setVoucherDiscount(Number(data.voucher.discountBdt || 0)); setVoucherMessage(`Voucher applied: -${formatBdt(Number(data.voucher.discountBdt || 0))}`); }
+    } catch { setVoucherStatus("error"); setVoucherDiscount(0); setVoucherMessage("Voucher could not be applied."); }
   }
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -255,6 +281,8 @@ export function CheckoutPage() {
       const response = await fetch("/api/orders", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          ...(effectiveRedeemCoins > 0 ? { redeemCoins: effectiveRedeemCoins } : {}),
+          ...(voucherStatus === "valid" && voucherCode.trim() ? { voucherCode: voucherCode.trim().toUpperCase() } : {}),
           customerInfo: {
             name: addressFields.name,
             phone: addressFields.phone,
@@ -272,7 +300,13 @@ export function CheckoutPage() {
           paymentMethod: "COD",
         }),
       });
-      const result = await response.json() as { item?: { _id: string }; deliveryAccessKey?: string; error?: string };
+      let result: { item?: { _id: string }; deliveryAccessKey?: string; error?: string } = {};
+      try {
+        const text = await response.text();
+        result = text ? (JSON.parse(text) as { item?: { _id: string }; deliveryAccessKey?: string; error?: string }) : {};
+      } catch {
+        result = {};
+      }
       if (!response.ok || !result.item) throw new Error(result.error || "Could not place your order");
       if (!buyNowProductId) clearCart();
       if (result.deliveryAccessKey) {
@@ -319,5 +353,5 @@ export function CheckoutPage() {
         <p className="subtle">{t("onlinePaymentUnavailable")}</p>
       </fieldset>
       <button className="button-primary" disabled={busy || !locations}>{busy ? t("placingOrder") : `${t("placeOrder")} · ${formatBdt(total)}`}</button>
-    </form><div className="dashboard-card"><h2>{t("orderSummary")}</h2>{checkoutItems.map((line) => <div key={`${line.id}:${line.variantId ?? ""}`} style={{ display: "grid", gap: 2, fontSize: 12, marginBottom: 10 }}><div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><span>{line.name}{line.variantLabel ? ` (${line.variantLabel})` : ""}</span><strong>{formatBdt(line.price * line.quantity)}</strong></div><div className="subtle">Qty: {line.quantity.toLocaleString("en-BD")} {unitLabel(line.unit, locale)} · Current: {formatBdt(line.price)} each</div></div>)}<hr style={{ border: 0, borderTop: "1px solid var(--line)", margin: "16px 0" }} /><p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px" }}><span>Product total</span><span>{formatBdt(subtotal)}</span></p><p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px" }}><span>Delivery charge</span><span>{formatBdt(deliveryCharge)}</span></p><strong style={{ display: "flex", justifyContent: "space-between" }}><span>Final payable</span><span>{formatBdt(total)}</span></strong></div></div></div>;
+    </form><div className="dashboard-card"><h2>{t("orderSummary")}</h2>{checkoutItems.map((line) => <div key={`${line.id}:${line.variantId ?? ""}`} style={{ display: "grid", gap: 2, fontSize: 12, marginBottom: 10 }}><div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}><span>{line.name}{line.variantLabel ? ` (${line.variantLabel})` : ""}</span><strong>{formatBdt(line.price * line.quantity)}</strong></div><div className="subtle">Qty: {line.quantity.toLocaleString("en-BD")} {unitLabel(line.unit, locale)} · Current: {formatBdt(line.price)} each</div></div>)}<hr style={{ border: 0, borderTop: "1px solid var(--line)", margin: "16px 0" }} /><p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px" }}><span>Product total</span><span>{formatBdt(subtotal)}</span></p><p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px" }}><span>Delivery charge</span><span>{formatBdt(deliveryCharge)}</span></p>{coinDiscount > 0 && <p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px", color: "#166534" }}><span>Coin discount</span><span>-{formatBdt(coinDiscount)}</span></p>}{effectiveVoucherDiscount > 0 && <p style={{ display: "flex", justifyContent: "space-between", margin: "0 0 6px", color: "#166534" }}><span>Voucher discount</span><span>-{formatBdt(effectiveVoucherDiscount)}</span></p>}<strong style={{ display: "flex", justifyContent: "space-between" }}><span>Final payable</span><span>{formatBdt(total)}</span></strong>{coinConfig?.canRedeem && coinConfig.balanceCoins >= coinConfig.minimumRedeemCoins && <div className="field" style={{ marginTop: 10 }}><label htmlFor="redeemCoins">Redeem coins (balance {coinConfig.balanceCoins})</label><input id="redeemCoins" type="number" min={0} max={coinConfig.balanceCoins} step={1} value={effectiveRedeemCoins} onChange={(e) => { setRedeemCoins(Math.max(0, Math.floor(Number(e.target.value || 0)))); setVoucherStatus(""); setVoucherDiscount(0); setVoucherMessage(""); }} /><small className="subtle">Min {coinConfig.minimumRedeemCoins}, {coinConfig.coinsPer1Taka} coin = ৳1, max {coinConfig.maxRedeemPercentPerOrder}%.</small></div>}<div className="field" style={{ marginTop: 10 }}><label htmlFor="voucherCode">Reward voucher code</label><div style={{ display: "flex", gap: 8 }}><input id="voucherCode" value={voucherCode} onChange={(e) => { setVoucherCode(e.target.value.toUpperCase()); setVoucherStatus(""); setVoucherDiscount(0); setVoucherMessage(""); }} placeholder="LGT-XXXX" maxLength={40} /><button type="button" className="button-secondary" disabled={voucherStatus === "checking" || !voucherCode.trim()} onClick={applyVoucher}>Apply</button></div>{voucherMessage && <small className={voucherStatus === "error" ? "form-error" : "subtle"}>{voucherMessage}</small>}</div></div></div></div>;
 }

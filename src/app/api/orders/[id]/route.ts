@@ -6,6 +6,9 @@ import { apiError, readJson } from "@/lib/http";
 import { createDeliveryAuditEntry } from "@/lib/delivery-audit";
 import { aggregateOrderStatus } from "@/lib/order-status";
 import { verifyDeliveryAccessKey } from "@/lib/delivery-security";
+import { awardOrderCoinsIfEligible } from "@/lib/coin-rewards";
+import { issueRewardVouchersIfEligible } from "@/lib/reward-vouchers";
+import { orderIdFilter } from "@/lib/order-id";
 
 const schema = z.object({
   status: z.enum(["pending", "confirmed", "shipped", "delivered", "cancelled"]),
@@ -24,11 +27,12 @@ type Context = { params: Promise<{ id: string }> };
 
 export async function GET(request: Request, { params }: Context) {
   const { id } = await params;
-  if (!/^[a-f\\d]{24}$/i.test(id)) return Response.json({ error: "Invalid order id" }, { status: 400 });
+  const orderFilter = orderIdFilter(id);
+  if (!orderFilter) return Response.json({ error: "Invalid order id" }, { status: 400 });
   try {
     await connectDb();
     const accessKey = new URL(request.url).searchParams.get("accessKey") ?? "";
-    const order = await Order.findById(id).select(accessKey ? "+delivery.accessKeyHash" : "").lean();
+    const order = await Order.findOne(orderFilter).select(accessKey ? "+delivery.accessKeyHash" : "").lean();
     if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
     const access = await requireUser(["super_admin","admin","vendor","customer"]).catch(() => null);
     const user = access && !("error" in access) ? access.user : null;
@@ -44,6 +48,7 @@ export async function GET(request: Request, { params }: Context) {
     };
     return Response.json({ item: safe });
   } catch (error) {
+    console.error("GET /api/orders/[id] error:", error);
     return apiError(error);
   }
 }
@@ -61,9 +66,10 @@ export async function PATCH(request: Request, { params }: Context) {
       return Response.json({ error: "Use the delivery action to record a delivered order." }, { status: 409 });
     }
     const { id } = await params;
-    if (!/^[a-f\\d]{24}$/i.test(id)) return Response.json({ error: "Invalid order id" }, { status: 400 });
+    const orderFilter = orderIdFilter(id);
+    if (!orderFilter) return Response.json({ error: "Invalid order id" }, { status: 400 });
     await connectDb();
-    const order = await Order.findById(id);
+    const order = await Order.findOne(orderFilter);
     if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
     const previousStatus = order.status;
     const restock: { productId: string; variantId?: string; quantity: number }[] = [];
@@ -98,6 +104,9 @@ export async function PATCH(request: Request, { params }: Context) {
       `${previousStatus} -> ${order.status}; actor ${access.user.id}`,
     ));
     await order.save();
+    if (order.status === "delivered") {
+      try { await awardOrderCoinsIfEligible(id); } catch { /* non-fatal */ }
+    }
     await Promise.all(restock.map((item) => Product.updateOne(
       { _id: item.productId },
       { $inc: { stock: item.quantity, ...(item.variantId ? { "variants.$[variant].stock": item.quantity } : {}) } },
@@ -105,6 +114,7 @@ export async function PATCH(request: Request, { params }: Context) {
     )));
     return Response.json({ item: order });
   } catch (error) {
+    console.error("PATCH /api/orders/[id] error:", error);
     if (error instanceof Error && error.name === "VersionError") {
       return Response.json({ error: "This order changed at the same time. Refresh and try again." }, { status: 409 });
     }

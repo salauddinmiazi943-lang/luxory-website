@@ -1,12 +1,14 @@
 import { z } from "zod";
 import mongoose from "mongoose";
 import { connectDb } from "@/lib/db";
-import { Order, Product } from "@/lib/models";
+import { Order, Product, UserWallet, CoinTransaction } from "@/lib/models";
 import { getSession, requirePermission, requireUser } from "@/lib/auth";
 import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
 import { isValidQuantity } from "@/lib/product-units";
-import { discountPercent, resolveSimplePricing, resolveVariantPricing } from "@/lib/pricing";
+import { discountPercent, normalizeBuyerRole, resolveSimplePricing, resolveVariantPricing, roleMoq, roleUnitPrice } from "@/lib/pricing";
 import { resolveDefaultDeliveryCharge } from "@/lib/delivery-charge";
+import { validateRedeemRequest } from "@/lib/coin-rewards";
+import { markVoucherUsed, validateVoucherForCheckout } from "@/lib/reward-vouchers";
 import { auditProtectionMode, verifyDeliveryAudit } from "@/lib/delivery-audit";
 import { createDeliveryAccessKey } from "@/lib/delivery-security";
 import { resolveBangladeshAddress } from "@/lib/bangladesh-locations";
@@ -27,6 +29,8 @@ const schema = z.object({
       if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "Each product option can appear only once", path: [] });
     }),
   paymentMethod: z.literal("COD").default("COD"),
+  redeemCoins: z.number().int().min(0).max(10000000).optional().default(0),
+  voucherCode: z.string().trim().max(40).optional().default(""),
 });
 
 export async function GET() {
@@ -91,12 +95,12 @@ export async function GET() {
     }));
     return Response.json({ items });
   } catch (error) {
+    console.error("GET /api/orders error:", error);
     return apiError(error);
   }
 }
-
+// Guest checkout is allowed (no login required). Rate-limited to reduce abuse.
 export async function POST(request: Request) {
-  // Guest checkout is allowed (no login required). Rate-limited to reduce abuse.
   if (!rateLimit(clientKey(request, "checkout"), 8)) return Response.json({ error: "Too many checkout attempts. Try again shortly." }, { status: 429 });
   try {
     const parsed = await readJson(request, schema);
@@ -118,6 +122,20 @@ export async function POST(request: Request) {
     if (hasLocationIds && !location) {
       return Response.json({ error: "The selected address locations do not match." }, { status: 400 });
     }
+    const session = await getSession();
+    let customerId: string | undefined;
+    let customerEmail: string | undefined;
+    let buyerRole: "retail" | "reseller" | "wholesaler" = "retail";
+    if (session) {
+      const access = await requireUser();
+      if ("error" in access) return access.error;
+      if (access.user.role === "customer" || access.user.role === "reseller" || access.user.role === "wholesaler") {
+        customerId = access.user.id;
+        customerEmail = access.user.email;
+      }
+      if (access.user.role === "reseller") buyerRole = "reseller";
+      if (access.user.role === "wholesaler") buyerRole = "wholesaler";
+    }
     await connectDb();
     const products = await Product.find({ _id: { $in: parsed.data.items.map((item) => item.productId) }, active: true, approved: true }).lean();
     if (products.length !== new Set(parsed.data.items.map((item) => item.productId)).size) return Response.json({ error: "One or more products are unavailable" }, { status: 400 });
@@ -131,8 +149,11 @@ export async function POST(request: Request) {
       if (!isValidQuantity(product.unit, line.quantity)) throw new Error(`Quantity must use valid ${product.unit ?? "piece"} increments`);
       if ((variant?.stock ?? product.stock) < line.quantity) throw new Error("Insufficient stock for one or more products");
       // Server verifies prices from DB; never trust client-submitted totals/prices.
-      const pricing = variant ? resolveVariantPricing(variant) : resolveSimplePricing(product);
-      const unitPrice = pricing.current;
+      const basePricing = variant ? resolveVariantPricing(variant) : resolveSimplePricing(product);
+      const moq = variant ? 1 : roleMoq(product, buyerRole);
+      if (line.quantity < moq) throw new Error(`Minimum order quantity for this product is ${moq} ${product.unit ?? "piece"}`);
+      const unitPrice = variant ? basePricing.current : roleUnitPrice(product, basePricing.current, buyerRole);
+      const pricing = { ...basePricing, current: unitPrice, original: basePricing.original > unitPrice ? basePricing.original : unitPrice };
       const originalPrice = pricing.original > unitPrice ? pricing.original : undefined;
       const lineTotal = unitPrice * line.quantity;
       return {
@@ -146,17 +167,7 @@ export async function POST(request: Request) {
         status: "pending" as const,
       };
     });
-    const session = await getSession();
-    let customerId: string | undefined;
-    let customerEmail: string | undefined;
-    if (session) {
-      const access = await requireUser();
-      if ("error" in access) return access.error;
-      if (access.user.role === "customer") {
-        customerId = access.user.id;
-        customerEmail = access.user.email;
-      }
-    }
+
     const reserved: { id: string; variantId?: string; quantity: number }[] = [];
     try {
       for (const line of orderItems) {
@@ -179,7 +190,28 @@ export async function POST(request: Request) {
       const deliveryAccess = customerId ? undefined : createDeliveryAccessKey();
       const deliveryCharge = await resolveDefaultDeliveryCharge();
       const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
-      const total = subtotal + deliveryCharge;
+      let coinDiscount = 0;
+      let coinsRedeemed = 0;
+      const requestedRedeem = Math.floor(Number(parsed.data.redeemCoins || 0));
+      if (requestedRedeem > 0) {
+        if (!customerId) return Response.json({ error: "Sign in to redeem coins." }, { status: 401 });
+        const redeem = await validateRedeemRequest(customerId, requestedRedeem, subtotal + deliveryCharge);
+        if (!redeem.ok) return Response.json({ error: redeem.error }, { status: 400 });
+        coinDiscount = Number(redeem.discountBdt.toFixed(2));
+        coinsRedeemed = redeem.coins;
+      }
+      let voucherDiscount = 0;
+      let appliedVoucherId: string | null = null;
+      let appliedVoucherCode = "";
+      const payableAfterCoin = Math.max(0, subtotal + deliveryCharge - coinDiscount);
+      const requestedVoucher = String(parsed.data.voucherCode || "").trim();
+      if (requestedVoucher) {
+        if (!customerId) return Response.json({ error: "Sign in to use a voucher." }, { status: 401 });
+        const v = await validateVoucherForCheckout(customerId, requestedVoucher, payableAfterCoin);
+        if (!v.ok) return Response.json({ error: v.error }, { status: 400 });
+        if (v.voucher) { voucherDiscount = Number(v.discountBdt.toFixed(2)); appliedVoucherId = String(v.voucher._id); appliedVoucherCode = v.voucherCode; }
+      }
+      const total = Math.max(0, subtotal + deliveryCharge - coinDiscount - voucherDiscount);
       const { division, district, upazila, area, address, union, ...customerDetails } = submittedLocation;
       const order = await Order.create({
         customer: customerId,
@@ -200,28 +232,48 @@ export async function POST(request: Request) {
           area: (area ?? "").trim(),
           address,
           email: customerEmail,
-        }, items: orderItems,
+        },
+        items: orderItems,
         subtotal,
         deliveryCharge,
         total,
+        ...(coinDiscount > 0 ? { coinDiscount, coinsRedeemed } : {}),
+        ...(voucherDiscount > 0 && appliedVoucherCode ? { voucherDiscount, voucherCode: appliedVoucherCode } : {}),
         ...(deliveryAccess ? { delivery: { accessKeyHash: deliveryAccess.hash } } : {}),
       });
+      if (coinsRedeemed > 0 && customerId) {
+        const dec = await UserWallet.updateOne({ userId: customerId, balanceCoins: { $gte: coinsRedeemed } }, { $inc: { balanceCoins: -coinsRedeemed, totalRedeemedCoins: coinsRedeemed } });
+        if (!dec.modifiedCount) throw new Error("Insufficient coin balance.");
+        await CoinTransaction.create({
+          userId: customerId,
+          orderId: order._id,
+          amount: -coinsRedeemed,
+          type: "redeem",
+          description: `Coins redeemed for order ${String(order._id)} (discount ৳${coinDiscount.toLocaleString("en-BD")})`,
+        });
+      }
+      if (appliedVoucherId && customerId) {
+        const used = await markVoucherUsed(appliedVoucherId, customerId, String(order._id));
+        if (!used) throw new Error("Voucher could not be applied. It may have been used or expired.");
+      }
       return Response.json({
         item: { _id: String(order._id) },
         ...(deliveryAccess ? { deliveryAccessKey: deliveryAccess.key } : {}),
       }, { status: 201 });
-    } catch (error) {
-      await Promise.all(reserved.map((line) => Product.updateOne(
-        { _id: line.id },
-        { $inc: { stock: line.quantity, ...(line.variantId ? { "variants.$[variant].stock": line.quantity } : {}) } },
-        line.variantId ? { arrayFilters: [{ "variant._id": line.variantId }] } : undefined,
-      )));
-      throw error;
+    } catch (stockError) {
+      for (const entry of reserved) {
+        if (entry.variantId) await Product.updateOne({ _id: entry.id, "variants._id": entry.variantId }, { $inc: { stock: entry.quantity, "variants.$.stock": entry.quantity } });
+        else await Product.updateOne({ _id: entry.id }, { $inc: { stock: entry.quantity } });
+      }
+      throw stockError;
     }
   } catch (error) {
-    if (error instanceof Error && (error.message.includes("stock") || error.message.includes("Stock"))) {
+    if (error instanceof Error && (error.message.includes("stock") || error.message.includes("Stock") || error.message.includes("unavailable") || error.message.includes("changed during checkout") || error.message.includes("Minimum order quantity"))) {
       return Response.json({ error: error.message }, { status: 409 });
     }
+    console.error("POST /api/orders error:", error);
     return apiError(error);
   }
 }
+
+

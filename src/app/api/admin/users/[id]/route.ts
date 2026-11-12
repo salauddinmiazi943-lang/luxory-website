@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
 import { User } from "@/lib/models";
@@ -9,17 +10,18 @@ const schema = z.object({ status: z.enum(["active", "inactive"]).optional(), per
 type Context = { params: Promise<{ id: string }> };
 
 export async function PATCH(request: Request, { params }: Context) {
-  const access = await requireUser(["super_admin"]);
-  if ("error" in access) return access.error;
   try {
+    const access = await requireUser(["super_admin"]);  
+    if ("error" in access) return access.error;  
+  
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
     const { id } = await params;
-    if (!/^[a-f\d]{24}$/i.test(id)) return Response.json({ error: "Invalid user id" }, { status: 400 });
+    if (!/^[a-f\d]{24}$/i.test(id)) return NextResponse.json({ error: "Invalid user id" }, { status: 400 });
     await connectDb();
     const user = await User.findOneAndUpdate({ _id: id, role: "admin" }, parsed.data, { new: true, runValidators: true }).select("-passwordHash");
-    if (!user) return Response.json({ error: "Admin user not found" }, { status: 404 });
-    return Response.json({ item: user });
+    if (!user) return NextResponse.json({ error: "Admin user not found" }, { status: 404 });
+    return NextResponse.json({ item: user });
   } catch (error) {
     return apiError(error);
   }

@@ -1,8 +1,8 @@
-import { Schema, models, model } from "mongoose";
+import mongoose, { Schema, models, model } from "mongoose";
 import type { Model, Types } from "mongoose";
 import { productUnits } from "@/lib/product-units";
 
-export type AppRole = "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer";
+export type AppRole = "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler";
 export type OrderStatus = "pending" | "confirmed" | "shipped" | "delivered" | "failed" | "cancelled";
 type CartEntry = { productId: Types.ObjectId; variantId?: Types.ObjectId; quantity: number };
 type SavedCustomerAddress = {
@@ -28,7 +28,7 @@ type SavedCustomerAddress = {
 };
 type UserRecord = {
   name: string; email: string; passwordHash: string; employeeId?: string; phone?: string; address?: string; shopName?: string;
-  role: AppRole; permissions: string[]; status: "active" | "inactive" | "suspended"; cart?: CartEntry[];
+  role: AppRole; permissions: string[]; status: "active" | "inactive" | "suspended" | "pending" | "rejected"; cart?: CartEntry[];
   savedAddresses?: SavedCustomerAddress[];
 };
 type OrderLine = {
@@ -51,7 +51,7 @@ type OrderRecord = {
     divisionId?: string; divisionBn?: string; districtId?: string; districtBn?: string;
     upazilaId?: string; upazilaBn?: string; unionId?: string; union?: string; unionBn?: string;
   };
-  items: OrderLine[]; subtotal?: number; deliveryCharge?: number; total: number; paymentMethod: "COD"; status: OrderStatus | "partially_delivered";
+  items: OrderLine[]; subtotal?: number; deliveryCharge?: number; coinDiscount?: number; coinsRedeemed?: number; voucherDiscount?: number; voucherCode?: string; total: number; paymentMethod: "COD"; status: OrderStatus | "partially_delivered";
   deliveryAudit: DeliveryAuditEntry[];
   delivery: {
     verificationStatus: "not_required" | "pending" | "verified" | "flagged";
@@ -86,14 +86,20 @@ const localized = {
 const deliveryAuditSchema = new Schema<DeliveryAuditEntry>({
   orderId: { type: String, required: true, immutable: true },
   actorId: { type: String, required: true, immutable: true },
-  actorRole: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer"], required: true, immutable: true },
+  actorRole: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer", "reseller", "wholesaler"], required: true, immutable: true },
   event: { type: String, required: true, maxlength: 80, immutable: true },
   occurredAt: { type: Date, required: true, immutable: true },
-  previousHash: { type: String, required: true, immutable: true },
+  // The first audit entry uses an empty string to mark the start of the hash chain.
+  previousHash: { type: String, immutable: true },
   hash: { type: String, required: true, immutable: true },
   signature: { type: String, immutable: true },
   details: { type: String, maxlength: 2000, immutable: true },
 }, { _id: false, versionKey: false });
+deliveryAuditSchema.pre("validate", function (this: mongoose.HydratedDocument<DeliveryAuditEntry>) {
+  if (typeof this.previousHash !== "string") {
+    this.invalidate("previousHash", "Path `previousHash` is required.");
+  }
+});
 
 const handoverSchema = new Schema({
   productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
@@ -183,9 +189,9 @@ const userSchema = new Schema<UserRecord>({
     required: function () { return this.role === "delivery_staff"; },
   },
   shopName: { type: String, trim: true, maxlength: 120 },
-  role: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer"], default: "customer", index: true },
+  role: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer", "reseller", "wholesaler"], default: "customer", index: true },
   permissions: [{ type: String, enum: ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_delivery_staff", "manage_vendors", "view_messages"] }],
-  status: { type: String, enum: ["active", "inactive", "suspended"], default: "active", index: true },
+  status: { type: String, enum: ["active", "inactive", "suspended", "pending", "rejected"], default: "active", index: true },
   cart: { type: [{
     productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     variantId: { type: Schema.Types.ObjectId },
@@ -251,6 +257,10 @@ const productSchema = new Schema({
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
   price: { type: Number, required: true, min: 0 },
   discountPrice: { type: Number, min: 0 },
+  resellerPrice: { type: Number, min: 0 },
+  wholesalerPrice: { type: Number, min: 0 },
+  resellerMoq: { type: Number, min: 0.01, default: 1 },
+  wholesalerMoq: { type: Number, min: 0.01, default: 1 },
   stock: { type: Number, required: true, min: 0, default: 0 },
   unit: { type: String, enum: productUnits, default: "piece" },
   variants: { type: [productVariantSchema], default: [] },
@@ -310,6 +320,12 @@ const orderSchema = new Schema<OrderRecord>({
     unitPrice: { type: Number, required: true, min: 0 },
     status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "failed", "cancelled"], default: "pending" },
   }],
+  subtotal: { type: Number, min: 0 },
+  deliveryCharge: { type: Number, min: 0, default: 0 },
+  coinDiscount: { type: Number, min: 0, default: 0 },
+  coinsRedeemed: { type: Number, min: 0, default: 0 },
+  voucherDiscount: { type: Number, min: 0, default: 0 },
+  voucherCode: { type: String, trim: true, maxlength: 40 },
   total: { type: Number, required: true, min: 0 },
   paymentMethod: { type: String, enum: ["COD"], default: "COD" },
   status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "failed", "cancelled", "partially_delivered"], default: "pending", index: true },
@@ -332,12 +348,14 @@ orderSchema.pre(["deleteOne", "deleteMany", "findOneAndDelete"], function () {
 });
 
 const applicationSchema = new Schema({
+  applicationType: { type: String, enum: ["vendor", "reseller", "wholesaler"], default: "vendor", index: true },
   name: { type: String, required: true, trim: true, maxlength: 120 },
   shopName: { type: String, required: true, trim: true, maxlength: 120 },
   email: { type: String, required: true, lowercase: true, trim: true },
   phone: { type: String, required: true, trim: true, maxlength: 30 },
   address: { type: String, required: true, trim: true, maxlength: 1000 },
   description: { type: String, required: true, trim: true, maxlength: 3000 },
+  tradeLicense: { type: String, trim: true, maxlength: 200, default: "" },
   documents: [{ type: String }],
   status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
 }, { timestamps: true });
@@ -387,3 +405,104 @@ const deliverySettingsSchema = new Schema({
 export const DeliverySettings = models.DeliverySettings || model("DeliverySettings", deliverySettingsSchema);
 export const VendorApplication = models.VendorApplication || model("VendorApplication", applicationSchema);
 export const ContactMessage = models.ContactMessage || model("ContactMessage", contactSchema);
+
+type CoinRewardSettingsRecord = {
+  coinEarning: { retailPer1000: number; resellerPer1000: number; wholesalerPer1000: number };
+  coinRedemption: { coins: number; bdt: number; minRedeemCoins: number };
+  voucher: { purchaseThreshold: number; voucherAmount: number; expiryDays: number; minOrderAmount: number };
+  toggles: { rewardSystemEnabled: boolean; coinUsageEnabled: boolean; voucherSystemEnabled: boolean };
+  updatedBy: string;
+};
+
+const coinRewardSettingsSchema = new Schema<CoinRewardSettingsRecord>({
+  coinEarning: {
+    retailPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+    resellerPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+    wholesalerPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+  },
+  coinRedemption: {
+    coins: { type: Number, required: true, min: 1, max: 1000000, default: 100 },
+    bdt: { type: Number, required: true, min: 0, max: 1000000, default: 5 },
+    minRedeemCoins: { type: Number, required: true, min: 0, max: 10000000, default: 500 },
+  },
+  voucher: {
+    purchaseThreshold: { type: Number, required: true, min: 0, max: 100000000, default: 50000 },
+    voucherAmount: { type: Number, required: true, min: 0, max: 10000000, default: 500 },
+    expiryDays: { type: Number, required: true, min: 0, max: 3650, default: 30 },
+    minOrderAmount: { type: Number, required: true, min: 0, max: 100000000, default: 0 },
+  },
+  toggles: {
+    rewardSystemEnabled: { type: Boolean, required: true, default: false },
+    coinUsageEnabled: { type: Boolean, required: true, default: false },
+    voucherSystemEnabled: { type: Boolean, required: true, default: false },
+  },
+  updatedBy: { type: String, required: true, maxlength: 64 },
+}, { timestamps: true });
+
+export const CoinRewardSettings: Model<CoinRewardSettingsRecord> = (models.CoinRewardSettings as Model<CoinRewardSettingsRecord> | undefined) || model<CoinRewardSettingsRecord>("CoinRewardSettings", coinRewardSettingsSchema);
+
+
+type UserWalletRecord = {
+  userId: mongoose.Types.ObjectId;
+  balanceCoins: number;
+  totalEarnedCoins: number;
+  totalRedeemedCoins: number;
+};
+
+const userWalletSchema = new Schema<UserWalletRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, unique: true, index: true },
+  balanceCoins: { type: Number, required: true, min: 0, default: 0 },
+  totalEarnedCoins: { type: Number, required: true, min: 0, default: 0 },
+  totalRedeemedCoins: { type: Number, required: true, min: 0, default: 0 },
+}, { timestamps: true });
+
+export const UserWallet: Model<UserWalletRecord> = (models.UserWallet as Model<UserWalletRecord> | undefined) || model<UserWalletRecord>("UserWallet", userWalletSchema);
+
+type CoinTransactionRecord = {
+  userId: mongoose.Types.ObjectId;
+  orderId?: mongoose.Types.ObjectId;
+  amount: number;
+  type: "earn" | "redeem" | "expire" | "admin_adjust";
+  description: string;
+  createdAt?: Date;
+};
+
+const coinTransactionSchema = new Schema<CoinTransactionRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", index: true },
+  amount: { type: Number, required: true },
+  type: { type: String, enum: ["earn", "redeem", "expire", "admin_adjust"], required: true, index: true },
+  description: { type: String, required: true, trim: true, maxlength: 500 },
+}, { timestamps: true });
+coinTransactionSchema.index({ userId: 1, orderId: 1, type: 1 });
+
+export const CoinTransaction: Model<CoinTransactionRecord> = (models.CoinTransaction as Model<CoinTransactionRecord> | undefined) || model<CoinTransactionRecord>("CoinTransaction", coinTransactionSchema);
+
+
+type RewardVoucherRecord = {
+  userId: mongoose.Types.ObjectId;
+  voucherCode: string;
+  amount: number;
+  minOrderAmount: number;
+  expiresAt: Date;
+  status: "active" | "used" | "expired";
+  createdAt?: Date;
+  usedAt?: Date;
+  orderId?: mongoose.Types.ObjectId;
+  milestone?: number;
+};
+
+const rewardVoucherSchema = new Schema<RewardVoucherRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  voucherCode: { type: String, required: true, unique: true, trim: true, uppercase: true, maxlength: 40 },
+  amount: { type: Number, required: true, min: 0 },
+  minOrderAmount: { type: Number, required: true, min: 0, default: 0 },
+  expiresAt: { type: Date, required: true, index: true },
+  status: { type: String, enum: ["active", "used", "expired"], required: true, default: "active", index: true },
+  usedAt: { type: Date },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+  milestone: { type: Number, min: 0 },
+}, { timestamps: true });
+rewardVoucherSchema.index({ userId: 1, status: 1, createdAt: -1 });
+
+export const RewardVoucher: Model<RewardVoucherRecord> = (models.RewardVoucher as Model<RewardVoucherRecord> | undefined) || model<RewardVoucherRecord>("RewardVoucher", rewardVoucherSchema);

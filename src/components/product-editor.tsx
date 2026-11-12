@@ -1,7 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import Image from "next/image";
 import { categoryProductPreset } from "@/lib/category-product-options";
+import { uploadToCloudinary } from "@/lib/cloudinary-client";
 import { productUnits, quantityStep, unitLabel, type ProductUnit } from "@/lib/product-units";
 
 type ProductOption = { id?: string; label: string; price: string; stock: string };
@@ -13,6 +15,10 @@ type ProductForEdit = {
   vendor?: string | { _id?: string };
   price?: number;
   discountPrice?: number;
+  resellerPrice?: number;
+  wholesalerPrice?: number;
+  resellerMoq?: number;
+  wholesalerMoq?: number;
   stock?: number;
   unit?: string;
   variants?: { _id?: string; label: string; price: number; stock: number }[];
@@ -53,6 +59,10 @@ export function ProductEditor({
   );
   const [price, setPrice] = useState(String(product.price ?? 0));
   const [discountPrice, setDiscountPrice] = useState(product.discountPrice == null ? "" : String(product.discountPrice));
+  const [resellerPrice, setResellerPrice] = useState(product.resellerPrice == null ? "" : String(product.resellerPrice));
+  const [wholesalerPrice, setWholesalerPrice] = useState(product.wholesalerPrice == null ? "" : String(product.wholesalerPrice));
+  const [resellerMoq, setResellerMoq] = useState(product.resellerMoq == null ? "1" : String(product.resellerMoq));
+  const [wholesalerMoq, setWholesalerMoq] = useState(product.wholesalerMoq == null ? "1" : String(product.wholesalerMoq));
   const [stock, setStock] = useState(String(product.stock ?? 0));
   const [variants, setVariants] = useState<ProductOption[]>(() => (product.variants ?? []).map((variant) => ({
     ...(variant._id ? { id: variant._id } : {}),
@@ -60,11 +70,40 @@ export function ProductEditor({
     price: String(variant.price),
     stock: String(variant.stock),
   })));
-  const [images, setImages] = useState((product.images ?? []).join("\n"));
+  const [images, setImages] = useState(product.images ?? []);
   const [active, setActive] = useState(product.active !== false);
   const [featured, setFeatured] = useState(Boolean(product.featured));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  async function uploadImages(event: React.ChangeEvent<HTMLInputElement>) {
+    const input = event.currentTarget;
+    const files = Array.from(input.files ?? []);
+    if (images.length + files.length > 12) {
+      setError(`You can use up to 12 images. ${images.length} already added.`);
+      input.value = "";
+      return;
+    }
+    if (files.some((file) => file.size > 10 * 1024 * 1024)) {
+      setError("Each image must be smaller than 10 MB.");
+      input.value = "";
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const results = await Promise.allSettled(files.map((file) => uploadToCloudinary(file)));
+      const urls = results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      setImages((current) => [...current, ...urls]);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) setError(failure.reason instanceof Error ? failure.reason.message : "Some images could not be uploaded.");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Image upload failed.");
+    } finally {
+      setBusy(false);
+      input.value = "";
+    }
+  }
 
   function changeCategory(categoryId: string) {
     setCategory(categoryId);
@@ -92,11 +131,15 @@ export function ProductEditor({
       description: { en: descriptionEn.trim(), bn: descriptionBn.trim() },
       category,
       unit,
-      images: images.split(/\r?\n|,/).map((image) => image.trim()).filter(Boolean),
+      images,
       active,
       featured,
     };
 
+    body.resellerPrice = resellerPrice.trim() ? Number(resellerPrice) : null;
+    body.wholesalerPrice = wholesalerPrice.trim() ? Number(wholesalerPrice) : null;
+    body.resellerMoq = resellerMoq.trim() ? Number(resellerMoq) : null;
+    body.wholesalerMoq = wholesalerMoq.trim() ? Number(wholesalerMoq) : null;
     if (variants.length) {
       body.variants = variants.map((variant) => ({
         ...(variant.id ? { id: variant.id } : {}),
@@ -152,12 +195,16 @@ export function ProductEditor({
         </div> : <>
           <div className="wide unit-options-toggle"><span>This product has no saved size/volume options yet. Add options to set a separate price and stock for each size or pack.</span><div className="product-editor-option-actions">{categoryProductPreset(categories.find((item) => item._id === category)) && <button type="button" className="button-secondary" onClick={() => changeCategory(category)}>Use category suggestions</button>}<button type="button" className="button-secondary" onClick={() => setVariants([{ label: "", price: "", stock: "" }])}>Add custom option</button></div></div>
           <div className="field"><label htmlFor="edit-product-price">Regular price per {unitLabel(unit)} (৳)</label><input id="edit-product-price" type="number" min="0" step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} required /></div>
-          <div className="field"><label htmlFor="edit-product-discount">Sale price per {unitLabel(unit)} (৳)</label><input id="edit-product-discount" type="number" min="0" step="0.01" value={discountPrice} onChange={(event) => setDiscountPrice(event.target.value)} /></div>
+          <div className="field"><label htmlFor="edit-product-discount">Sale price per {unitLabel(unit)} (৳, optional)</label><input id="edit-product-discount" type="number" min="0" step="0.01" value={discountPrice} onChange={(event) => setDiscountPrice(event.target.value)} /></div>
+          <div className="field"><label htmlFor="edit-reseller-price">Reseller price per {unitLabel(unit)} (৳, optional)</label><input id="edit-reseller-price" type="number" min="0" step="0.01" value={resellerPrice} onChange={(event) => setResellerPrice(event.target.value)} /></div>
+          <div className="field"><label htmlFor="edit-reseller-moq">Reseller MOQ ({unitLabel(unit)})</label><input id="edit-reseller-moq" type="number" min="0.01" step={quantityStep(unit)} value={resellerMoq} onChange={(event) => setResellerMoq(event.target.value)} /></div>
+          <div className="field"><label htmlFor="edit-wholesaler-price">Wholesaler price per {unitLabel(unit)} (৳, optional)</label><input id="edit-wholesaler-price" type="number" min="0" step="0.01" value={wholesalerPrice} onChange={(event) => setWholesalerPrice(event.target.value)} /></div>
+          <div className="field"><label htmlFor="edit-wholesaler-moq">Wholesaler MOQ ({unitLabel(unit)})</label><input id="edit-wholesaler-moq" type="number" min="0.01" step={quantityStep(unit)} value={wholesalerMoq} onChange={(event) => setWholesalerMoq(event.target.value)} /></div>
           <div className="field"><label htmlFor="edit-product-stock">Stock ({unitLabel(unit)})</label><input id="edit-product-stock" type="number" min="0" step={quantityStep(unit)} value={stock} onChange={(event) => setStock(event.target.value)} required /></div>
         </>}
 
         {userRole !== "vendor" && <div className="field"><label htmlFor="edit-product-vendor">Vendor</label><select id="edit-product-vendor" value={vendor} onChange={(event) => setVendor(event.target.value)}><option value="">Store product</option>{vendors.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.email}</option>)}</select></div>}
-        <div className="field wide"><label htmlFor="edit-product-images">Image URLs (one per line or comma-separated)</label><textarea id="edit-product-images" value={images} onChange={(event) => setImages(event.target.value)} /></div>
+        <div className="field wide"><label htmlFor="edit-product-images">Product images (up to 12)</label><input id="edit-product-images" type="file" accept="image/*" multiple disabled={busy || images.length >= 12} onChange={uploadImages} />{images.length > 0 && <><small className="subtle">{images.length} image(s)</small><div className="product-image-previews">{images.map((url, index) => <div className="product-image-preview" key={`${url}-${index}`}><Image src={url} alt={`Product image ${index + 1}`} width={224} height={176} unoptimized /><button type="button" disabled={busy} aria-label={`Remove product image ${index + 1}`} onClick={() => setImages((current) => current.filter((_, imageIndex) => imageIndex !== index))}>Remove</button></div>)}</div></>}</div>
         {userRole !== "vendor" && <div className="wide product-editor-checks"><label className="admin-check"><input type="checkbox" checked={active} onChange={(event) => setActive(event.target.checked)} /> Active</label><label className="admin-check"><input type="checkbox" checked={featured} onChange={(event) => setFeatured(event.target.checked)} /> Featured</label></div>}
         <footer className="product-editor-actions wide"><button type="button" className="button-secondary" disabled={busy} onClick={onClose}>Cancel</button><button type="submit" className="button-primary" disabled={busy}>{busy ? "Saving…" : "Save product"}</button></footer>
       </form>

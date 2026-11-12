@@ -7,6 +7,9 @@ import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
 import { createDeliveryAuditEntry } from "@/lib/delivery-audit";
 import { aggregateOrderStatus } from "@/lib/order-status";
 import { maybeRequestAutomaticDeliveryAudit } from "@/lib/delivery-audit-sampling";
+import { awardOrderCoinsIfEligible } from "@/lib/coin-rewards";
+import { issueRewardVouchersIfEligible } from "@/lib/reward-vouchers";
+import { orderIdFilter } from "@/lib/order-id";
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
 const schema = z.discriminatedUnion("action", [
@@ -45,7 +48,7 @@ class DeliveryActionError extends Error {
   }
 }
 
-function audit(order: { deliveryAudit: { hash: string }[] }, id: string, actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" }, event: string, details = "") {
+function audit(order: { deliveryAudit: { hash: string }[] }, id: string, actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler" | "reseller" | "wholesaler" | "reseller" | "wholesaler" }, event: string, details = "") {
   order.deliveryAudit.push(createDeliveryAuditEntry(id, order.deliveryAudit.at(-1)?.hash ?? "", actor, event, details));
 }
 
@@ -53,7 +56,7 @@ async function confirmReturn(
   id: string,
   returnId: string,
   condition: "good" | "damaged" | "disputed",
-  actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" },
+  actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler" | "reseller" | "wholesaler" | "reseller" | "wholesaler" },
 ) {
   const session = await mongoose.startSession();
   let saved: unknown;
@@ -107,7 +110,8 @@ export async function POST(request: Request, { params }: Context) {
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
     const { id } = await params;
-    if (!objectId.safeParse(id).success) return Response.json({ error: "Invalid order id" }, { status: 400 });
+    const orderFilter = orderIdFilter(id);
+    if (!orderFilter) return Response.json({ error: "Invalid order id" }, { status: 400 });
     const action: Action = parsed.data;
     if (action.action === "report" && !rateLimit(clientKey(request, "delivery-report"), 6)) {
       return Response.json({ error: "Too many delivery reports. Please try again later." }, { status: 429 });
@@ -129,7 +133,7 @@ export async function POST(request: Request, { params }: Context) {
       const item = await confirmReturn(id, action.returnId, action.condition, access.user);
       return Response.json({ item });
     }
-    const order = await Order.findById(id);
+    const order = await Order.findOne(orderFilter);
     if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
     const actorId = access.user.id;
     const assignedToDeliveryStaff = access.user.role === "delivery_staff" && order.delivery.assignment?.assignedTo === actorId;
@@ -341,8 +345,16 @@ export async function POST(request: Request, { params }: Context) {
     }
 
     await order.save();
+    if (action.action === "delivered" && order.status === "delivered") {
+      try { await awardOrderCoinsIfEligible(id); } catch { /* non-fatal: earning must not break delivery update */ }
+      const customerId = order.customer ? String(order.customer) : undefined;
+      if (customerId) {
+        try { await issueRewardVouchersIfEligible(customerId); } catch { /* non-fatal: voucher issuance must not break delivery update */ }
+      }
+    }
     return Response.json({ item: order });
   } catch (error) {
+    console.error("POST /api/orders/[id]/delivery error:", error);
     if (error instanceof DeliveryActionError) return Response.json({ error: error.message }, { status: error.status });
     if (error instanceof Error && error.name === "VersionError") {
       return Response.json({ error: "This order changed at the same time. Refresh and try again." }, { status: 409 });

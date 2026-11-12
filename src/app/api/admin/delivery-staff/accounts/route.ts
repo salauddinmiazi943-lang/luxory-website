@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
@@ -17,29 +18,31 @@ const createSchema = z.object({
 });
 
 export async function GET() {
-  const access = await requirePermission("manage_delivery_staff");
-  if ("error" in access) return access.error;
   try {
+    const access = await requirePermission("manage_delivery_staff");  
+    if ("error" in access) return access.error;  
+  
     await connectDb();
     const items = await User.find({ role: "delivery_staff" })
       .select("employeeId name email phone address status createdAt")
       .sort({ createdAt: -1 })
       .lean();
-    return Response.json({ items });
+    return NextResponse.json({ items });
   } catch (error) {
     return apiError(error);
   }
 }
 
 export async function POST(request: Request) {
-  const access = await requirePermission("manage_delivery_staff");
-  if ("error" in access) return access.error;
   try {
+    const access = await requirePermission("manage_delivery_staff");  
+    if ("error" in access) return access.error;  
+  
     const parsed = await readJson(request, createSchema);
     if ("error" in parsed) return parsed.error;
     await connectDb();
     if (!(await hasEmployeeIdUniqueIndex())) {
-      return Response.json({ error: "Employee ID index is not installed. Apply the delivery staff index migration before creating accounts." }, { status: 503 });
+      return NextResponse.json({ error: "Employee ID index is not installed. Apply the delivery staff index migration before creating accounts." }, { status: 503 });
     }
     const { password, ...profile } = parsed.data;
     const item = await User.create({
@@ -49,7 +52,7 @@ export async function POST(request: Request) {
       role: "delivery_staff",
       permissions: [],
     });
-    return Response.json({
+    return NextResponse.json({
       item: {
         id: String(item._id), employeeId: item.employeeId, name: item.name, email: item.email,
         phone: item.phone, address: item.address, status: item.status,
@@ -57,7 +60,7 @@ export async function POST(request: Request) {
     }, { status: 201 });
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) {
-      return Response.json({ error: "An account with this email or employee ID already exists" }, { status: 409 });
+      return NextResponse.json({ error: "An account with this email or employee ID already exists" }, { status: 409 });
     }
     return apiError(error);
   }

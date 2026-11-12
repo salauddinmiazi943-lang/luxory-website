@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
@@ -12,24 +13,26 @@ const createSchema = z.object({
 });
 
 export async function GET() {
-  const access = await requireUser(["super_admin"]);
-  if ("error" in access) return access.error;
   try {
+    const access = await requireUser(["super_admin"]);  
+    if ("error" in access) return access.error;  
+  
     await connectDb();
     const items = await User.find({ role: "admin" }).select("-passwordHash").sort({ createdAt: -1 }).lean();
-    return Response.json({ items });
+    return NextResponse.json({ items });
   } catch (error) {
     if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) {
-      return Response.json({ error: "An account with this email already exists" }, { status: 409 });
+      return NextResponse.json({ error: "An account with this email already exists" }, { status: 409 });
     }
     return apiError(error);
   }
 }
 
 export async function POST(request: Request) {
-  const access = await requireUser(["super_admin"]);
-  if ("error" in access) return access.error;
   try {
+    const access = await requireUser(["super_admin"]);  
+    if ("error" in access) return access.error;  
+  
     const parsed = await readJson(request, createSchema);
     if ("error" in parsed) return parsed.error;
     await connectDb();
@@ -37,7 +40,7 @@ export async function POST(request: Request) {
       name: parsed.data.name, email: parsed.data.email.toLowerCase(), role: "admin",
       permissions: parsed.data.permissions, passwordHash: await bcrypt.hash(parsed.data.password, 12),
     });
-    return Response.json({ item: { id: String(item._id), name: item.name, email: item.email, role: item.role, permissions: item.permissions } }, { status: 201 });
+    return NextResponse.json({ item: { id: String(item._id), name: item.name, email: item.email, role: item.role, permissions: item.permissions } }, { status: 201 });
   } catch (error) {
     return apiError(error);
   }

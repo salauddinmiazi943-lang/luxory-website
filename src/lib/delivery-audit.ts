@@ -1,10 +1,11 @@
 import { createHash, createHmac } from "node:crypto";
 import type { AppRole } from "@/lib/models";
+export type DeliveryActorRole = AppRole;
 
 export type DeliveryAuditEntry = {
   orderId: string;
   actorId: string;
-  actorRole: AppRole;
+  actorRole: DeliveryActorRole;
   event: string;
   occurredAt: Date;
   previousHash: string;

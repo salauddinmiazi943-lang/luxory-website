@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NextResponse } from "next/server";
 import { connectDb } from "@/lib/db";
 import { DeliverySettings } from "@/lib/models";
 import { requirePermission } from "@/lib/auth";
@@ -26,21 +27,23 @@ function normalize(settings: { auditFrequencyPercent?: number; defaultDeliveryCh
 }
 
 export async function GET() {
-  const access = await requirePermission("manage_bookings");
-  if ("error" in access) return access.error;
   try {
+    const access = await requirePermission("manage_bookings");
+    if ("error" in access) return access.error;
+  
     await connectDb();
     const settings = await DeliverySettings.findOne().lean();
-    return Response.json(normalize(settings as Parameters<typeof normalize>[0]));
+    return NextResponse.json(normalize(settings as Parameters<typeof normalize>[0]));
   } catch (error) {
     return apiError(error);
   }
 }
 
 export async function PATCH(request: Request) {
-  const access = await requirePermission("manage_bookings");
-  if ("error" in access) return access.error;
   try {
+    const access = await requirePermission("manage_bookings");
+    if ("error" in access) return access.error;
+  
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
     await connectDb();
@@ -49,7 +52,7 @@ export async function PATCH(request: Request) {
       { $set: { ...parsed.data, updatedBy: access.user.id } },
       { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true },
     ).lean();
-    return Response.json({ auditFrequencyPercent: settings.auditFrequencyPercent, defaultDeliveryCharge: settings.defaultDeliveryCharge ?? 60, updatedAt: settings.updatedAt });
+    return NextResponse.json({ auditFrequencyPercent: settings.auditFrequencyPercent, defaultDeliveryCharge: settings.defaultDeliveryCharge ?? 60, updatedAt: settings.updatedAt });
   } catch (error) {
     return apiError(error);
   }

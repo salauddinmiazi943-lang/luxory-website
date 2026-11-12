@@ -503,6 +503,10 @@ button { cursor: pointer; }
   box-shadow: 0 -8px 28px #10172c38;
 }
 body { padding-bottom: calc(76px + env(safe-area-inset-bottom)); }
+@media (min-width: 768px) {
+  .site-bottom-nav { display: none; }
+  body { padding-bottom: 0; }
+}
 .site-bottom-nav-item {
   position: relative;
   display: flex;

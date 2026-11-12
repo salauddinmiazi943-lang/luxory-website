@@ -72,3 +72,36 @@ export function resolveProductPricing(product: ProductPriceLike, selectedVariant
   const p = resolveSimplePricing(product);
   return { ...p, stock: toMoney(product.stock), variantLabel: "", hasVariants: false, selected: false };
 }
+
+export type BuyerRole = "retail" | "reseller" | "wholesaler" | string;
+export type RolePricingProduct = ProductPriceLike & { resellerPrice?: number | null; wholesalerPrice?: number | null; resellerMoq?: number | null; wholesalerMoq?: number | null };
+export function normalizeBuyerRole(role?: string | null): BuyerRole {
+  if (role === "reseller" || role === "wholesaler") return role;
+  return "retail";
+}
+export function roleUnitPrice(product: RolePricingProduct, baseCurrent: number, role?: string | null) {
+  const r = normalizeBuyerRole(role);
+  if (r === "reseller") {
+    const p = toMoney(product.resellerPrice);
+    if (p > 0) return p;
+  }
+  if (r === "wholesaler") {
+    const p = toMoney(product.wholesalerPrice);
+    if (p > 0) return p;
+  }
+  return baseCurrent;
+}
+export function roleMoq(product: RolePricingProduct, role?: string | null) {
+  const r = normalizeBuyerRole(role);
+  if (r === "reseller") return Math.max(1, toMoney(product.resellerMoq) || 1);
+  if (r === "wholesaler") return Math.max(1, toMoney(product.wholesalerMoq) || 1);
+  return 1;
+}
+export function resolveRolePricing(product: RolePricingProduct, role?: string | null, selectedVariantId?: string) {
+  const base = resolveProductPricing(product, selectedVariantId);
+  const moq = roleMoq(product, role);
+  // Role-specific simple product pricing (additive): applies when no variant selected; variants keep variant price.
+  const current = base.hasVariants && base.selected ? base.current : roleUnitPrice(product, base.current, role);
+  const original = base.original > current ? base.original : current;
+  return { ...base, current, original, discountPercent: discountPercent(original, current), moq, buyerRole: normalizeBuyerRole(role) };
+}
