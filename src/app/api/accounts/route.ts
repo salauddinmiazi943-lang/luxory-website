@@ -1,126 +1,87 @@
 import mongoose from "mongoose";
-import { requireAccountsAdmin, isResponse } from "@/lib/accounts/admin";
-import { getDailyAccountsData, parseDhakaDate } from "@/lib/accounts/ledger";
-import { prepareTransactionInput } from "@/lib/accounts/transactions";
+import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { AccountTransaction } from "@/models/account-transaction";
+import { AccountCategory, AccountParty, AccountTransaction, accountMethods, accountTransactionTypes } from "@/models/accounts";
+import { accountsApiUser, bangladeshToday, endOfDay, isValidDateOnly, startOfDay } from "@/lib/accounts/access";
 
-function responseError(error: unknown, status = 400) {
-  return Response.json({ error: error instanceof Error ? error.message : "হিসাবের অনুরোধ সম্পন্ন হয়নি।" }, { status });
-}
-
-function todayInDhaka() {
-  return new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-}
+const schema = z.object({
+  type: z.enum(accountTransactionTypes), date: z.string().refine(isValidDateOnly, "তারিখটি সঠিক নয়"),
+  amount: z.number().finite().positive().max(1_000_000_000), paid: z.number().finite().min(0).max(1_000_000_000).default(0),
+  method: z.enum(accountMethods), partyId: z.string().optional().nullable(), categoryId: z.string().optional().nullable(),
+  note: z.string().max(1000).default(""),
+}).superRefine((value, ctx) => {
+  if (["sale", "purchase"].includes(value.type) && value.paid > value.amount) ctx.addIssue({ code: "custom", path: ["paid"], message: "জমার টাকা মোট টাকার বেশি হতে পারবে না" });
+  if (["sale", "collection", "purchase", "supplier_payment"].includes(value.type) && !value.partyId) ctx.addIssue({ code: "custom", path: ["partyId"], message: "পার্টি নির্বাচন করুন" });
+  if (value.type === "sale" && value.partyId && value.paid > value.amount) ctx.addIssue({ code: "custom", path: ["paid"], message: "জমার পরিমাণ মোট টাকার বেশি হতে পারবে না" });
+});
 
 export async function GET(request: Request) {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
+  const auth = await accountsApiUser();
+  if (auth.response) return auth.response;
+  const url = new URL(request.url);
+  const date = url.searchParams.get("date") ?? new Date().toISOString().slice(0, 10);
+  if (!isValidDateOnly(date)) return Response.json({ error: "সঠিক তারিখ দিন" }, { status: 400 });
+  const type = url.searchParams.get("type");
+  const method = url.searchParams.get("method");
+  const partyId = url.searchParams.get("partyId");
+  const categoryId = url.searchParams.get("categoryId");
+  const filter: Record<string, unknown> = { date: { $gte: startOfDay(date), $lte: endOfDay(date) }, deletedAt: null };
+  if (type && (accountTransactionTypes as readonly string[]).includes(type)) filter.type = type;
+  if (method && (accountMethods as readonly string[]).includes(method)) filter.method = method;
+  if (partyId && mongoose.isValidObjectId(partyId)) filter.partyId = new mongoose.Types.ObjectId(partyId);
+  if (categoryId && mongoose.isValidObjectId(categoryId)) filter.categoryId = new mongoose.Types.ObjectId(categoryId);
   try {
     await connectDb();
-    const date = new URL(request.url).searchParams.get("date") ?? todayInDhaka();
-    parseDhakaDate(date);
-    return Response.json(await getDailyAccountsData(date), { headers: { "Cache-Control": "private, no-store" } });
-  } catch (error) {
-    return responseError(error, 400);
+    const [items, totals] = await Promise.all([
+      AccountTransaction.find(filter).sort({ date: -1, createdAt: -1 }).limit(500).lean(),
+      AccountTransaction.aggregate([
+        { $match: { date: { $gte: startOfDay(date), $lte: endOfDay(date) }, deletedAt: null } },
+        { $group: { _id: "$type", amount: { $sum: "$amountPaisa" }, paid: { $sum: "$paidPaisa" }, count: { $sum: 1 } } },
+      ]),
+    ]);
+    return Response.json({ items, totals });
+  } catch {
+    return Response.json({ error: "দৈনিক হিসাব লোড করা যায়নি" }, { status: 503 });
   }
 }
 
 export async function POST(request: Request) {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
+  const auth = await accountsApiUser();
+  if (auth.response) return auth.response;
   try {
+    const raw = await request.json();
+    const parsed = schema.safeParse(raw);
+    if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "তথ্য যাচাই করুন" }, { status: 400 });
+    const data = parsed.data;
+    if (data.date > bangladeshToday()) return Response.json({ error: "ভবিষ্যতের তারিখে হিসাব যোগ করা যাবে না" }, { status: 400 });
+    if (["sale", "collection"].includes(data.type) && data.partyId && !mongoose.isValidObjectId(data.partyId)) return Response.json({ error: "গ্রাহক নির্বাচন সঠিক নয়" }, { status: 400 });
+    if (["purchase", "supplier_payment"].includes(data.type) && data.partyId && !mongoose.isValidObjectId(data.partyId)) return Response.json({ error: "সরবরাহকারী নির্বাচন সঠিক নয়" }, { status: 400 });
+    if (data.categoryId && !mongoose.isValidObjectId(data.categoryId)) return Response.json({ error: "খাত নির্বাচন সঠিক নয়" }, { status: 400 });
     await connectDb();
-    const body = await request.json() as Record<string, unknown>;
-    const requestKey = typeof body.requestKey === "string" ? body.requestKey : "";
-    if (!/^[0-9a-f-]{36}$/i.test(requestKey)) throw new Error("Request key সঠিক নয়; পৃষ্ঠাটি রিফ্রেশ করে আবার চেষ্টা করুন।");
-    const existing = await AccountTransaction.findOne({ idempotencyKey: requestKey }).select("+idempotencyKey").lean();
-    if (existing) return Response.json({ item: existing, duplicate: true }, { headers: { "Cache-Control": "no-store" } });
-    const transaction = await prepareTransactionInput(body);
-    let created;
-    try {
-      created = await AccountTransaction.create({ ...transaction, idempotencyKey: requestKey, createdBy: new mongoose.Types.ObjectId(access.user.id) });
-    } catch (error) {
-      const duplicate = typeof error === "object" && error !== null && "code" in error && error.code === 11000;
-      if (!duplicate) throw error;
-      const raced = await AccountTransaction.findOne({ idempotencyKey: requestKey }).select("+idempotencyKey").lean();
-      if (!raced) throw error;
-      return Response.json({ item: raced, duplicate: true }, { headers: { "Cache-Control": "no-store" } });
+    let partyName = "";
+    if (data.partyId) {
+      const party = await AccountParty.findOne({ _id: data.partyId, active: true }).select("name type").lean();
+      const wanted = ["sale", "collection"].includes(data.type) ? "customer" : "supplier";
+      if (!party || party.type !== wanted) return Response.json({ error: wanted === "customer" ? "সঠিক গ্রাহক নির্বাচন করুন" : "সঠিক সরবরাহকারী নির্বাচন করুন" }, { status: 400 });
+      partyName = party.name;
     }
-    return Response.json({ item: created.toObject() }, { status: 201, headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    return responseError(error, 400);
-  }
-}
-
-export async function PATCH(request: Request) {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
-  try {
-    await connectDb();
-    const body = await request.json() as Record<string, unknown>;
-    const id = typeof body.id === "string" ? body.id : "";
-    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
-    if (!mongoose.isValidObjectId(id)) throw new Error("লেনদেনের নম্বর সঠিক নয়।");
-    if (reason.length < 3) throw new Error("সম্পাদনার কারণ লিখুন (কমপক্ষে ৩ অক্ষর)।");
-    const current = await AccountTransaction.findOne({ _id: id, voidedAt: { $exists: false } }).lean();
-    if (!current) return Response.json({ error: "লেনদেনটি পাওয়া যায়নি বা বাতিল করা হয়েছে।" }, { status: 404 });
-    const expectedRevision = Number(body.expectedRevision);
-    if (!Number.isInteger(expectedRevision) || expectedRevision !== (current.revision ?? 0)) return Response.json({ error: "এই হিসাবটি অন্য Admin পরিবর্তন করেছেন; নতুন তথ্য লোড করে আবার সম্পাদনা করুন।" }, { status: 409 });
-    const dateText = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Dhaka", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(current.date));
-    const candidate = await prepareTransactionInput({
-      ...body,
-      type: current.type,
-      date: body.date ?? dateText,
-      amount: body.amount ?? current.amount,
-      paidAmount: body.paidAmount ?? current.paidAmount,
-      paymentMethod: body.paymentMethod ?? current.paymentMethod,
-      partyId: Object.hasOwn(body, "partyId") ? body.partyId : current.partyId ? String(current.partyId) : "",
-      categoryId: Object.hasOwn(body, "categoryId") ? body.categoryId : current.category ? String(current.category) : "",
-      partyName: body.partyName ?? current.partyName,
-      note: body.note ?? current.note,
-      balanceSide: body.balanceSide ?? current.balanceSide,
+    let categoryName = "";
+    if (data.categoryId) {
+      const category = await AccountCategory.findOne({ _id: data.categoryId, active: true }).select("name type").lean();
+      const wanted = ["expense", "supplier_payment", "purchase"].includes(data.type) ? "expense" : "income";
+      if (!category || category.type !== wanted) return Response.json({ error: "লেনদেনের ধরনের সঙ্গে মিল আছে এমন খাত নির্বাচন করুন" }, { status: 400 });
+      categoryName = category.name;
+    }
+    const amountPaisa = Math.round(data.amount * 100);
+    const paidPaisa = Math.round(data.paid * 100);
+    const item = await AccountTransaction.create({
+      type: data.type, amountPaisa, paidPaisa, method: data.method,
+      partyId: data.partyId || null, partyName, categoryId: data.categoryId || null, categoryName,
+      note: data.note.trim(), date: startOfDay(data.date), createdBy: auth.user!.id, updatedBy: auth.user!.id,
+      audit: [{ action: "created", actorId: auth.user!.id, note: "নতুন হিসাব" }],
     });
-    const before = {
-      date: current.date, amount: current.amount, paidAmount: current.paidAmount, dueAmount: current.dueAmount,
-      category: current.category, partyId: current.partyId, partyName: current.partyName,
-      paymentMethod: current.paymentMethod, note: current.note, balanceSide: current.balanceSide,
-    };
-    const revision = current.revision ?? 0;
-    const updated = await AccountTransaction.updateOne(
-      { _id: current._id, voidedAt: { $exists: false }, $or: [{ revision }, { revision: { $exists: false } }] },
-      { $set: { ...candidate, revision: revision + 1 }, $push: { editHistory: { changedAt: new Date(), changedBy: new mongoose.Types.ObjectId(access.user.id), reason, before } } },
-      { runValidators: true },
-    );
-    if (updated.modifiedCount !== 1) return Response.json({ error: "লেনদেনটি একই সময়ে বদলেছে; আবার তথ্য লোড করে চেষ্টা করুন।" }, { status: 409 });
-    return Response.json({ ok: true, revision: revision + 1 }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    return responseError(error, 400);
-  }
-}
-
-export async function DELETE(request: Request) {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
-  try {
-    await connectDb();
-    const body = await request.json() as Record<string, unknown>;
-    const id = typeof body.id === "string" ? body.id : "";
-    const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 500) : "";
-    if (!mongoose.isValidObjectId(id)) throw new Error("লেনদেনের নম্বর সঠিক নয়।");
-    if (reason.length < 3) throw new Error("বাতিলের কারণ লিখুন (কমপক্ষে ৩ অক্ষর)।");
-    const current = await AccountTransaction.findOne({ _id: id, voidedAt: { $exists: false } }).lean();
-    if (!current) return Response.json({ error: "লেনদেনটি পাওয়া যায়নি বা আগেই বাতিল হয়েছে।" }, { status: 404 });
-    const expectedRevision = Number(body.expectedRevision);
-    if (!Number.isInteger(expectedRevision) || expectedRevision !== (current.revision ?? 0)) return Response.json({ error: "এই হিসাবটি অন্য Admin পরিবর্তন করেছেন; নতুন তথ্য লোড করে আবার চেষ্টা করুন।" }, { status: 409 });
-    const revision = current.revision ?? 0;
-    const result = await AccountTransaction.updateOne(
-      { _id: current._id, voidedAt: { $exists: false }, $or: [{ revision }, { revision: { $exists: false } }] },
-      { $set: { voidedAt: new Date(), voidedBy: new mongoose.Types.ObjectId(access.user.id), voidReason: reason, revision: revision + 1 }, $push: { editHistory: { changedAt: new Date(), changedBy: new mongoose.Types.ObjectId(access.user.id), reason: `বাতিল: ${reason}`, before: { type: current.type, date: current.date, amount: current.amount, paidAmount: current.paidAmount, dueAmount: current.dueAmount, partyId: current.partyId, partyName: current.partyName, paymentMethod: current.paymentMethod, balanceSide: current.balanceSide } } } },
-    );
-    if (result.modifiedCount !== 1) return Response.json({ error: "লেনদেনটি একই সময়ে বদলেছে; আবার চেষ্টা করুন।" }, { status: 409 });
-    return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
-  } catch (error) {
-    return responseError(error, 400);
+    return Response.json({ item }, { status: 201 });
+  } catch {
+    return Response.json({ error: "হিসাব সংরক্ষণ করা যায়নি" }, { status: 503 });
   }
 }

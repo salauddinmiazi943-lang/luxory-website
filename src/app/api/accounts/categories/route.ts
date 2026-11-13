@@ -1,35 +1,26 @@
-import mongoose from "mongoose";
-import { requireAccountsAdmin, isResponse } from "@/lib/accounts/admin";
+import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { AccountCategory } from "@/models/account-category";
+import { accountsApiUser } from "@/lib/accounts/access";
+import { AccountCategory } from "@/models/accounts";
 
+const schema = z.object({ name: z.string().trim().min(2).max(80), type: z.enum(["income", "expense"]) });
 export async function GET() {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
-  try {
-    await connectDb();
-    const categories = await AccountCategory.find({}).sort({ type: 1, name: 1 }).lean();
-    return Response.json({ categories }, { headers: { "Cache-Control": "private, no-store" } });
-  } catch {
-    return Response.json({ error: "খাতের তালিকা পাওয়া যায়নি।" }, { status: 503 });
-  }
+  const auth = await accountsApiUser();
+  if (auth.response) return auth.response;
+  try { await connectDb(); return Response.json({ items: await AccountCategory.find({ active: true }).sort({ type: 1, name: 1 }).lean() }); }
+  catch { return Response.json({ error: "খাতের তালিকা আনা যায়নি" }, { status: 503 }); }
 }
-
 export async function POST(request: Request) {
-  const access = await requireAccountsAdmin();
-  if (isResponse(access)) return access.error;
+  const auth = await accountsApiUser();
+  if (auth.response) return auth.response;
   try {
+    const parsed = schema.safeParse(await request.json());
+    if (!parsed.success) return Response.json({ error: parsed.error.issues[0]?.message ?? "তথ্য যাচাই করুন" }, { status: 400 });
     await connectDb();
-    const body = await request.json() as Record<string, unknown>;
-    const name = typeof body.name === "string" ? body.name.trim() : "";
-    const type = body.type;
-    if (!name || name.length > 100 || (type !== "expense" && type !== "payment")) {
-      return Response.json({ error: "খাতের নাম ও ধরন সঠিকভাবে দিন।" }, { status: 400 });
-    }
-    const category = await AccountCategory.create({ name, type, createdBy: new mongoose.Types.ObjectId(access.user.id) });
-    return Response.json({ category }, { status: 201, headers: { "Cache-Control": "no-store" } });
+    const item = await AccountCategory.create({ ...parsed.data, createdBy: auth.user!.id });
+    return Response.json({ item }, { status: 201 });
   } catch (error) {
-    const duplicate = typeof error === "object" && error !== null && "code" in error && error.code === 11000;
-    return Response.json({ error: duplicate ? "এই ধরনের একই নামের খাত আগে থেকেই আছে।" : "খাত সংরক্ষণ হয়নি।" }, { status: 400 });
+    if (typeof error === "object" && error !== null && "code" in error && error.code === 11000) return Response.json({ error: "এই খাতটি আগে থেকেই আছে" }, { status: 409 });
+    return Response.json({ error: "খাত সংরক্ষণ করা যায়নি" }, { status: 503 });
   }
 }
