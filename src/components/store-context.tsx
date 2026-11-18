@@ -136,6 +136,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("eshop-locale", value);
     document.documentElement.lang = value;
   }, []);
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
   const addToCart = useCallback((line: Omit<CartLine, "quantity"> & { quantity?: number }) => {
     setCart((current) => {
       const key = cartLineKey(line);

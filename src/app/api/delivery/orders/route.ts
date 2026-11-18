@@ -1,5 +1,5 @@
 import { connectDb } from "@/lib/db";
-import { Order } from "@/lib/models";
+import { Order, User } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
 import { apiError } from "@/lib/http";
 
@@ -8,6 +8,8 @@ export async function GET() {
   if ("error" in access) return access.error;
   try {
     await connectDb();
+    const staff = await User.findOne({ _id: access.user.id, role: "delivery_staff", status: "active" }).select("_id");
+    if (!staff) return Response.json({ error: "Delivery staff account is not active" }, { status: 403 });
     const orders = await Order.find({ "delivery.assignment.assignedTo": access.user.id })
       .sort({ createdAt: -1 })
       .lean();

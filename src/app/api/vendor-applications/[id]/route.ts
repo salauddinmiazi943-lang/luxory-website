@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import bcrypt from "bcryptjs";
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { User, VendorApplication } from "@/lib/models";
-import { requirePermission } from "@/lib/auth";
+import { Order, Product, User, VendorApplication } from "@/lib/models";
+import { requirePermission, requireUser } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
 
 const schema = z.object({ status: z.enum(["approved", "rejected"]) });
@@ -44,6 +44,41 @@ export async function PATCH(request: Request, { params }: Context) {
     }
     await application.save();
     return Response.json({ item: application, ...(temporaryPassword ? { temporaryPassword } : {}) });
+  } catch (error) {
+    return apiError(error);
+  }
+}
+
+export async function DELETE(_request: Request, { params }: Context) {
+  const access = await requireUser(["super_admin"]);
+  if ("error" in access) return access.error;
+  try {
+    const { id } = await params;
+    if (!/^[a-f\d]{24}$/i.test(id)) return Response.json({ error: "Invalid application id" }, { status: 400 });
+    await connectDb();
+
+    const application = await VendorApplication.findByIdAndDelete(id).lean();
+    if (!application) return Response.json({ error: "Application not found" }, { status: 404 });
+
+    let userAction: "none" | "deleted" | "suspended" = "none";
+    if (application.status === "approved") {
+      const user = await User.findOne({ email: application.email, role: { $in: ["vendor", "reseller", "wholesaler"] } }).select("_id").lean();
+      if (user) {
+        const [productCount, orderCount] = await Promise.all([
+          Product.countDocuments({ vendor: user._id }),
+          Order.countDocuments({ "items.vendorId": user._id }),
+        ]);
+        if (productCount || orderCount) {
+          await User.updateOne({ _id: user._id }, { $set: { status: "suspended" } });
+          userAction = "suspended";
+        } else {
+          await User.deleteOne({ _id: user._id });
+          userAction = "deleted";
+        }
+      }
+    }
+
+    return Response.json({ success: true, userAction });
   } catch (error) {
     return apiError(error);
   }

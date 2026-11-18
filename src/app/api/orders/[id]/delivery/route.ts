@@ -1,7 +1,7 @@
 import mongoose from "mongoose";
 import { z } from "zod";
 import { connectDb } from "@/lib/db";
-import { Order, Product, User } from "@/lib/models";
+import { Order, Product, User, type AppRole } from "@/lib/models";
 import { hasPermission, requireUser } from "@/lib/auth";
 import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
 import { createDeliveryAuditEntry } from "@/lib/delivery-audit";
@@ -9,6 +9,7 @@ import { aggregateOrderStatus } from "@/lib/order-status";
 import { maybeRequestAutomaticDeliveryAudit } from "@/lib/delivery-audit-sampling";
 import { awardOrderCoinsIfEligible } from "@/lib/coin-rewards";
 import { issueRewardVouchersIfEligible } from "@/lib/reward-vouchers";
+import { recordStockMovements } from "@/lib/stock-movements";
 import { orderIdFilter } from "@/lib/order-id";
 
 const objectId = z.string().regex(/^[a-f\d]{24}$/i);
@@ -48,7 +49,7 @@ class DeliveryActionError extends Error {
   }
 }
 
-function audit(order: { deliveryAudit: { hash: string }[] }, id: string, actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler" | "reseller" | "wholesaler" | "reseller" | "wholesaler" }, event: string, details = "") {
+function audit(order: { deliveryAudit: { hash: string }[] }, id: string, actor: { id: string; role: AppRole }, event: string, details = "") {
   order.deliveryAudit.push(createDeliveryAuditEntry(id, order.deliveryAudit.at(-1)?.hash ?? "", actor, event, details));
 }
 
@@ -56,7 +57,7 @@ async function confirmReturn(
   id: string,
   returnId: string,
   condition: "good" | "damaged" | "disputed",
-  actor: { id: string; role: "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler" | "reseller" | "wholesaler" | "reseller" | "wholesaler" },
+  actor: { id: string; role: AppRole },
 ) {
   const session = await mongoose.startSession();
   let saved: unknown;
@@ -98,6 +99,23 @@ async function confirmReturn(
   } finally {
     await session.endSession();
   }
+  if (condition === "good" && saved) {
+    const receipt = (saved as { delivery: { returns: { _id?: unknown; productId: string; variantId?: string; title: string; countedQuantity: number }[] } }).delivery.returns
+      .find((entry) => String(entry._id ?? "") === returnId);
+    if (receipt) {
+      await recordStockMovements([{
+        productId: receipt.productId,
+        variantId: receipt.variantId,
+        productTitle: receipt.title,
+        delta: receipt.countedQuantity,
+        reason: "return_restocked",
+        orderId: id,
+        actorId: actor.id,
+        actorRole: actor.role,
+        note: `ফেরত receipt ${returnId}`,
+      }]);
+    }
+  }
   return saved;
 }
 
@@ -129,6 +147,10 @@ export async function POST(request: Request, { params }: Context) {
     }
 
     await connectDb();
+    if (access.user.role === "delivery_staff") {
+      const activeStaff = await User.findOne({ _id: access.user.id, role: "delivery_staff", status: "active" }).select("_id");
+      if (!activeStaff) return Response.json({ error: "Delivery staff account is not active" }, { status: 403 });
+    }
     if (action.action === "confirm_return") {
       const item = await confirmReturn(id, action.returnId, action.condition, access.user);
       return Response.json({ item });

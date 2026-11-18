@@ -11,7 +11,9 @@ export function GuestDeliveryReport({ orderId }: { orderId: string }) {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    setAccessKey(window.sessionStorage.getItem(`delivery-access:${orderId}`) ?? "");
+    const stored = window.sessionStorage.getItem(`delivery-access:${orderId}`) ?? "";
+    const frame = window.requestAnimationFrame(() => setAccessKey(stored));
+    return () => window.cancelAnimationFrame(frame);
   }, [orderId]);
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {

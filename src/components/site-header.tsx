@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { Search, ShoppingBag, UserRound, Menu, X, ChevronDown } from "lucide-react";
@@ -21,14 +22,14 @@ export function SiteHeader() {
       <div className="wrap main-header">
         <button aria-label="Toggle navigation" className="mobile-menu" onClick={() => setMenuOpen(!menuOpen)}>{menuOpen ? <X size={21} /> : <Menu size={21} />}</button>
         <Link className="brand" href="/" aria-label="Luxora Global Trade">
-          <img src="/logo.png" alt="Luxora Global Trade" className="brand-logo" />
+          <Image src="/images/luxora-logo-removebg-preview.png" alt="Luxora Global Trade" className="brand-logo-img" width={420} height={140} sizes="(max-width: 650px) 160px, (max-width: 900px) 200px, 260px" priority />
         </Link>
         <form className="search-box" onSubmit={submitSearch}><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("search")} aria-label={t("search")} /><button aria-label="Search"><Search size={20} /></button></form>
         <div className="header-actions"><Link href="/account" className="header-action"><UserRound size={20} /><span>{t("account")}</span></Link><Link href="/cart" className="header-action cart-action"><span className="cart-icon"><ShoppingBag size={21} /><b>{cart.reduce((sum, item) => sum + item.quantity, 0)}</b></span><span>{t("cart")}</span></Link></div>
       </div>
       <nav className={`nav-bar ${menuOpen ? "nav-open" : ""}`}><div className="wrap nav-inner">
         <Link className="nav-category" href="/products"><Menu size={16} />{t("allCategories")}<ChevronDown size={14} /></Link>
-        <Link href="/products">{t("products")}</Link><Link href="/blog">{t("blog")}</Link><Link href="/products?sort=bestSeller">{t("bestSeller")}</Link><Link href="/products?sort=new">{t("newArrival")}</Link><Link href="/vendor-application">{t("applyVendor")}</Link><Link href="/business-application">Reseller/Wholesaler</Link><Link href="/contact">{t("contact")}</Link>
+        <Link href="/products">{t("products")}</Link><Link href="/blog">{t("blog")}</Link>        <Link href="/products?sort=bestSeller">{t("bestSeller")}</Link><Link href="/products?sort=new">{t("newArrival")}</Link><Link href="/products?sort=offer">{t("todayOffer")}</Link><Link href="/vendor-application">{t("applyVendor")}</Link><Link href="/reseller">{t("reseller")}</Link><Link href="/wholesaler">{t("wholesaler")}</Link><Link href="/contact">{t("contact")}</Link>
       </div></nav>
     </header>
   );

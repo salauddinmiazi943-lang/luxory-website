@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { requireAccountsPage } from "@/lib/accounts/access";
-import { AccountsDashboard } from "@/components/accounts/dashboard";
+import { ExactHisab } from "@/components/accounts/exact-hisab";
 
 export const metadata: Metadata = {
   title: "ব্যবসার হিসাব-নিকাশ",
@@ -8,6 +8,6 @@ export const metadata: Metadata = {
 };
 
 export default async function AccountsPage() {
-  const user = await requireAccountsPage();
-  return <AccountsDashboard isAdmin={user.accountsAdmin} />;
+  await requireAccountsPage();
+  return <ExactHisab />;
 }

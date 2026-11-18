@@ -32,9 +32,9 @@ export function ProductSection({ title, featured = false, bestSeller = false, ca
     }).catch(() => setLoadError(true)).finally(() => setLoaded(true));
   }, [bestSeller, categoryId, discounted, featured, limit]);
   const show = products.length ? products : (!loaded && allowFallback && !categoryId ? fallbackProducts : []);
-  return <section className="section wrap"><div className="section-heading"><div><p className="eyebrow">{eyebrow ?? (discounted ? "OFFER PRODUCTS" : featured ? "HANDPICKED FOR YOU" : "FRESH FINDS")}</p><h2>{title}</h2></div><Link className="text-link" href={link}>{discounted ? "View All Offers" : t("viewAll")} <ArrowRight size={16} /></Link></div>
+  return <section className="section wrap"><div className="section-heading"><div><p className="eyebrow">{eyebrow ?? (discounted ? t("eyebrowOfferProducts") : featured ? t("eyebrowHandpicked") : t("eyebrowFreshFinds"))}</p><h2>{title}</h2></div><Link className="text-link" href={link}>{discounted ? t("viewAllOffers") : t("viewAll")} <ArrowRight size={16} /></Link></div>
     {show.length ? <div className="product-grid">{show.map((product, index) => <ProductCard key={product._id ?? product.slug} product={product} index={index} />)}</div> : loaded && <p className="subtle">{t("noProducts")}</p>}
     {loadError && <p className="subtle">{t("catalogUnavailable")}</p>}
-    {!loaded && <p className="subtle center">Updating the collection…</p>}
+    {!loaded && <p className="subtle center">{t("updatingCollection")}</p>}
   </section>;
 }

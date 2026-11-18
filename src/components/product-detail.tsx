@@ -32,6 +32,11 @@ export function ProductDetail({ slug }: { slug: string }) {
   const [postingComment, setPostingComment] = useState(false);
   const [selectedVariantId, setSelectedVariantId] = useState("");
   const [quantity, setQuantity] = useState(1);
+  const [detailZoomed, setDetailZoomed] = useState(false);
+  const [tradeRole, setTradeRole] = useState<"reseller" | "wholesaler" | null>(null);
+  useEffect(() => { fetch("/api/auth/me").then((r)=>r.json() as Promise<{user?:{role?:string}|null}>).then((d)=>{ if(d.user?.role==="reseller") setTradeRole("reseller"); else if(d.user?.role==="wholesaler") setTradeRole("wholesaler"); }).catch(()=>{}); }, []);
+
+  function toggleDetailZoom() { setDetailZoomed((current) => !current); }
 
   useEffect(() => {
     let active = true;
@@ -87,6 +92,7 @@ export function ProductDetail({ slug }: { slug: string }) {
   const canAct = stock > 0 && (!hasVariants || Boolean(selectedVariant?._id)) && isValidQuantity(unit, quantity) && quantity <= stock;
 
   function buyNow() {
+    if (tradeRole) { router.push(tradeRole === "reseller" ? "/reseller-center" : "/wholesale-center"); return; }
     if (!product?._id || (hasVariants && !selectedVariant?._id) || !canAct) return;
     const params = new URLSearchParams({ buyNow: product._id, quantity: String(quantity), ...(selectedVariant?._id ? { variantId: selectedVariant._id } : {}) });
     router.push(`/checkout?${params.toString()}`);
@@ -95,13 +101,13 @@ export function ProductDetail({ slug }: { slug: string }) {
   return <div className="page-shell">
     <div className="breadcrumb"><Link href="/">Home</Link> / <Link href="/products">Products</Link> / {name}</div>
     <div className="product-detail">
-      <div className="detail-art">{image?.startsWith("https://res.cloudinary.com/") ? <Image src={image} alt={name} width={600} height={600} style={{ width: "100%", height: "100%", objectFit: "cover", borderRadius: 5 }} /> : "◉"}</div>
+      <div className={`detail-art${detailZoomed ? " is-zoomed" : ""}`} onDoubleClick={toggleDetailZoom}>{image?.startsWith("https://res.cloudinary.com/") ? <Image src={image} alt={name} width={800} height={800} sizes="(max-width: 900px) 100vw, 50vw" style={{ width: "100%", height: "auto", objectFit: "contain", borderRadius: 5, background: "var(--image-bg)" }} /> : "◉"}</div>
       <div className="detail-copy">
         <p className="eyebrow">{product.category?.name?.[locale] || "Store product"}</p>
         <h1>{name}</h1>
         <div className="detail-price" style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
           <strong>{formatBdt(pricing.current)}</strong>
-          {pricing.discountPercent > 0 ? <del style={{ color: "#a4aaae", fontSize: 15 }}>{formatBdt(pricing.original)}</del> : null}
+          {pricing.discountPercent > 0 ? <del style={{ color: "var(--muted)", fontSize: 15 }}>{formatBdt(pricing.original)}</del> : null}
           {pricing.discountPercent > 0 ? <span className="sale-tag" style={{ position: "static" }}>{pricing.discountPercent}% OFF</span> : null}
           <span>/ {hasVariants ? (pricing.variantLabel || selectedVariant?.label || t("productOption")) : unitLabel(unit, locale)}</span>
         </div>
@@ -118,11 +124,11 @@ export function ProductDetail({ slug }: { slug: string }) {
         </div>}
         <p>{stock <= 0 ? t("outOfStock") : `${stock} ${unitLabel(unit, locale)} ${t("inStock")}`}</p>
         {stock > 0 && <div className="field product-quantity-field"><label htmlFor="product-quantity">Quantity ({unitLabel(unit, locale)})</label><input id="product-quantity" type="number" min={step} max={stock} step={step} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} /></div>}
-        <div className="product-detail-actions">
+        {tradeRole ? <div className="product-detail-actions" style={{ flexWrap: "wrap" }}><p className="form-error" style={{ width: "100%", margin: 0 }}>রিসেলার/হোলসেল ক্রেতা হিসেবে সাধারণ Checkout/কার্ট ব্যবহার করা যাবে না। অর্ডার অনুরোধ (Order Request) পাঠাতে রিসেলার/হোলসেল সেন্টারে যান।</p><Link className="button-primary" href={tradeRole === "reseller" ? "/reseller-center" : "/wholesale-center"}>অর্ডার অনুরোধ (Order Request)</Link><button type="button" className={`button-secondary wishlist-detail-button${wishlisted ? " is-active" : ""}`} aria-pressed={wishlisted} onClick={() => toggleWishlist(product)}><Heart size={16} fill={wishlisted ? "currentColor" : "none"} /> {wishlisted ? "Saved to wishlist" : "Add to wishlist"}</button></div> : <div className="product-detail-actions">
           <button type="button" className="button-primary" disabled={!canAct} onClick={buyNow}><ShoppingBag size={16} /> {t("buyNow")}</button>
           <button type="button" className="button-secondary" disabled={!canAct} onClick={() => addToCart({ id, slug: product.slug, name, image: image ?? "", originalPrice: pricing.discountPercent > 0 ? pricing.original : undefined, price: pricing.current, quantity, unit, ...(selectedVariant?._id ? { variantId: selectedVariant._id, variantLabel: selectedVariant.label } : {}) })}>{t("addToCart")}</button>
           <button type="button" className={`button-secondary wishlist-detail-button${wishlisted ? " is-active" : ""}`} aria-pressed={wishlisted} onClick={() => toggleWishlist(product)}><Heart size={16} fill={wishlisted ? "currentColor" : "none"} /> {wishlisted ? "Saved to wishlist" : "Add to wishlist"}</button>
-        </div>
+        </div>}
         <p className="subtle">{t("secureCheckout")}</p>
       </div>
     </div>

@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ShieldCheck, ArrowLeft, Home } from "lucide-react";
@@ -115,7 +116,7 @@ function AdminLoginForm() {
       <div style={{ maxWidth: 500, margin: "20px auto 40px" }}>
         <div style={{ textAlign: "center", marginBottom: 24 }}>
           <Link href="/" onClick={(e) => { e.preventDefault(); navigateHome(); }} className="brand" aria-label="Luxora Global Trade" style={{ justifyContent: "center", display: "inline-flex" }}>
-            <img src="/images/luxora-logo.jpg" alt="Luxora Global Trade" className="brand-logo" style={{ height: 44, width: "auto" }} />
+            <Image src="/images/luxora-logo-removebg-preview.png" alt="Luxora Global Trade" className="brand-logo-img" width={420} height={140} sizes="240px" style={{ height: 64, width: "auto", maxWidth: 240 }} priority />
           </Link>
           <h1 className="page-title" style={{ marginTop: 16, fontSize: 24, display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <ShieldCheck size={26} color="var(--primary, #f85606)" /> Super Admin Login
@@ -161,6 +162,9 @@ function AdminLoginForm() {
           <button className="button-primary" style={{ width: "100%", justifyContent: "center", marginTop: 10 }} disabled={busy}>
             {busy ? "Authenticating…" : "Sign In to Admin Panel"}
           </button>
+          <p className="subtle" style={{ textAlign: "center", marginTop: 12 }}>
+            <Link href="/forgot-password" style={{ color: "var(--primary-bg)", fontWeight: 600 }}>Forgot Password?</Link>
+          </p>
         </form>
 
         <div style={{ textAlign: "center", marginTop: 24 }}>

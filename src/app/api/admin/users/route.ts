@@ -5,11 +5,11 @@ import { connectDb } from "@/lib/db";
 import { User } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
+import { ADMIN_PERMISSIONS } from "@/lib/permissions";
 
-const permissions = ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_delivery_staff", "manage_vendors", "view_messages"] as const;
 const createSchema = z.object({
   name: z.string().trim().min(2).max(120), email: z.string().trim().email().max(254),
-  password: z.string().min(10).max(128), permissions: z.array(z.enum(permissions)).max(permissions.length).default([]),
+  password: z.string().min(10).max(128), permissions: z.array(z.enum(ADMIN_PERMISSIONS)).default([]),
 });
 
 export async function GET() {

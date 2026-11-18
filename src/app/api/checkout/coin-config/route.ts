@@ -1,8 +1,8 @@
 ﻿import { apiError } from "@/lib/http";
 import { connectDb } from "@/lib/db";
 import { getSession } from "@/lib/auth";
-import { CoinTransaction, UserWallet } from "@/lib/models";
-import { getCoinSettings, redeemValueBdt } from "@/lib/coin-rewards";
+import { UserWallet } from "@/lib/models";
+import { getCoinSettings } from "@/lib/coin-rewards";
 
 export async function GET() {
   try {

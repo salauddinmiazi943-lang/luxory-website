@@ -5,6 +5,7 @@ import type { SortOrder } from "mongoose";
 import { getSession, hasPermission, requireUser } from "@/lib/auth";
 import { apiError, cloudinaryUrl, readJson, slugify, translated } from "@/lib/http";
 import { isValidQuantity, productUnits } from "@/lib/product-units";
+import { recordStockMovements } from "@/lib/stock-movements";
 
 const localeText = z.object({ en: z.string().trim().min(1).max(5000), bn: z.string().trim().max(5000).optional() });
 const productVariant = z.object({
@@ -138,6 +139,17 @@ export async function POST(request: Request) {
       approved: result.user.role !== "vendor" || process.env.VENDOR_PRODUCTS_REQUIRE_APPROVAL === "false",
       active: result.user.role === "vendor" && process.env.VENDOR_PRODUCTS_REQUIRE_APPROVAL !== "false" ? false : parsed.data.active,
     });
+    await recordStockMovements([{
+      productId: created._id,
+      productTitle: created.title?.en ?? "",
+      delta: created.stock ?? 0,
+      stockBefore: 0,
+      stockAfter: created.stock ?? 0,
+      reason: "product_created",
+      actorId: result.user.id,
+      actorRole: result.user.role,
+      note: `নতুন পণ্য · ${created.stock ?? 0} ${created.unit ?? "piece"}`,
+    }]);
     return Response.json({ item: created }, { status: 201 });
   } catch (error) {
     return apiError(error);

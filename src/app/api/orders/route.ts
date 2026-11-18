@@ -1,36 +1,58 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 import mongoose from "mongoose";
 import { connectDb } from "@/lib/db";
 import { Order, Product, UserWallet, CoinTransaction } from "@/lib/models";
 import { getSession, requirePermission, requireUser } from "@/lib/auth";
 import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
 import { isValidQuantity } from "@/lib/product-units";
-import { discountPercent, normalizeBuyerRole, resolveSimplePricing, resolveVariantPricing, roleMoq, roleUnitPrice } from "@/lib/pricing";
-import { resolveDefaultDeliveryCharge } from "@/lib/delivery-charge";
+import { discountPercent, resolveSimplePricing, resolveVariantPricing, roleMoq, roleUnitPrice } from "@/lib/pricing";
+import { calculateDeliveryCharge, resolveDeliveryRuleConfig } from "@/lib/delivery-charge";
 import { validateRedeemRequest } from "@/lib/coin-rewards";
 import { markVoucherUsed, validateVoucherForCheckout } from "@/lib/reward-vouchers";
 import { auditProtectionMode, verifyDeliveryAudit } from "@/lib/delivery-audit";
 import { createDeliveryAccessKey } from "@/lib/delivery-security";
 import { resolveBangladeshAddress } from "@/lib/bangladesh-locations";
+import { recordStockMovements } from "@/lib/stock-movements";
+
+const PAYMENT_METHODS = ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"] as const;
 
 const schema = z.object({
   customerInfo: z.object({
     name: z.string().trim().min(2).max(120), phone: z.string().trim().min(6).max(30),
-    division: z.string().trim().min(2).max(120), district: z.string().trim().min(2).max(120),
-    upazila: z.string().trim().min(2).max(120), area: z.string().trim().max(120).optional().default(""),
+    division: z.string().trim().max(120).optional().default(""),
+    district: z.string().trim().max(120).optional().default(""),
+    upazila: z.string().trim().max(120).optional().default(""),
+    area: z.string().trim().max(120).optional().default(""),
     divisionId: z.string().max(12).optional(), districtId: z.string().max(12).optional(),
     upazilaId: z.string().max(12).optional(), unionId: z.string().max(12).optional(),
     union: z.string().trim().max(120).optional().default(""),
     address: z.string().trim().min(5).max(500), notes: z.string().trim().max(2000).default(""),
   }),
+  deliveryArea: z.enum(["inside_dhaka", "outside_dhaka"]).optional(),
   items: z.array(z.object({ productId: z.string().regex(/^[a-f\d]{24}$/i), variantId: z.string().regex(/^[a-f\d]{24}$/i).optional(), quantity: z.number().positive().max(100_000) })).min(1).max(30)
     .superRefine((items, context) => {
       const keys = items.map((item) => `${item.productId}:${item.variantId ?? ""}`);
       if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "Each product option can appear only once", path: [] });
     }),
-  paymentMethod: z.literal("COD").default("COD"),
+  paymentMethod: z.enum(PAYMENT_METHODS).default("COD"),
+  bkashTransactionId: z.string().trim().max(40).optional().default(""),
+  bkashSenderNumber: z.string().trim().max(30).optional().default(""),
+  paymentTransactionId: z.string().trim().max(40).optional().default(""),
+  paymentSenderNumber: z.string().trim().max(30).optional().default(""),
+  paymentSenderAccountInfo: z.string().trim().max(200).optional().default(""),
   redeemCoins: z.number().int().min(0).max(10000000).optional().default(0),
   voucherCode: z.string().trim().max(40).optional().default(""),
+}).superRefine((value, context) => {
+  if (value.paymentMethod === "COD") return;
+  const trx = (value.paymentTransactionId || value.bkashTransactionId || "").trim();
+  if (!/^[0-9A-Za-z]{6,20}$/.test(trx)) context.addIssue({ code: "custom", path: ["paymentTransactionId"], message: "Transaction/Reference ID must be 6-20 letters or digits" });
+  if (value.paymentMethod === "BANK") {
+    const info = (value.paymentSenderAccountInfo || value.paymentSenderNumber || "").trim();
+    if (info.length < 3) context.addIssue({ code: "custom", path: ["paymentSenderAccountInfo"], message: "Enter sender bank account info" });
+  } else {
+    const sender = (value.paymentSenderNumber || value.bkashSenderNumber || "").trim();
+    if (!/^01[0-9]{9}$/.test(sender)) context.addIssue({ code: "custom", path: ["paymentSenderNumber"], message: "Enter a valid 11-digit sender number" });
+  }
 });
 
 export async function GET() {
@@ -99,17 +121,14 @@ export async function GET() {
     return apiError(error);
   }
 }
-// Guest checkout is allowed (no login required). Rate-limited to reduce abuse.
+
 export async function POST(request: Request) {
   if (!rateLimit(clientKey(request, "checkout"), 8)) return Response.json({ error: "Too many checkout attempts. Try again shortly." }, { status: 429 });
   try {
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
     const submittedLocation = parsed.data.customerInfo;
-    const hasLocationIds = Boolean(
-      submittedLocation.divisionId || submittedLocation.districtId ||
-      submittedLocation.upazilaId,
-    );
+    const hasLocationIds = Boolean(submittedLocation.divisionId || submittedLocation.districtId || submittedLocation.upazilaId);
     const location = hasLocationIds
       ? submittedLocation.divisionId && submittedLocation.districtId
         ? resolveBangladeshAddress({
@@ -125,16 +144,17 @@ export async function POST(request: Request) {
     const session = await getSession();
     let customerId: string | undefined;
     let customerEmail: string | undefined;
-    let buyerRole: "retail" | "reseller" | "wholesaler" = "retail";
+    const buyerRole = "retail" as const;
     if (session) {
       const access = await requireUser();
       if ("error" in access) return access.error;
-      if (access.user.role === "customer" || access.user.role === "reseller" || access.user.role === "wholesaler") {
+      if (access.user.role === "reseller" || access.user.role === "wholesaler") {
+        return Response.json({ error: "Wholesale and reseller buyers cannot use regular checkout. Please submit an order request." }, { status: 403 });
+      }
+      if (access.user.role === "customer") {
         customerId = access.user.id;
         customerEmail = access.user.email;
       }
-      if (access.user.role === "reseller") buyerRole = "reseller";
-      if (access.user.role === "wholesaler") buyerRole = "wholesaler";
     }
     await connectDb();
     const products = await Product.find({ _id: { $in: parsed.data.items.map((item) => item.productId) }, active: true, approved: true }).lean();
@@ -148,7 +168,6 @@ export async function POST(request: Request) {
       if (!line.variantId && variants?.length) throw new Error("Choose an option for each product");
       if (!isValidQuantity(product.unit, line.quantity)) throw new Error(`Quantity must use valid ${product.unit ?? "piece"} increments`);
       if ((variant?.stock ?? product.stock) < line.quantity) throw new Error("Insufficient stock for one or more products");
-      // Server verifies prices from DB; never trust client-submitted totals/prices.
       const basePricing = variant ? resolveVariantPricing(variant) : resolveSimplePricing(product);
       const moq = variant ? 1 : roleMoq(product, buyerRole);
       if (line.quantity < moq) throw new Error(`Minimum order quantity for this product is ${moq} ${product.unit ?? "piece"}`);
@@ -168,28 +187,24 @@ export async function POST(request: Request) {
       };
     });
 
-    const reserved: { id: string; variantId?: string; quantity: number }[] = [];
+    const reserved: { id: string; variantId?: string; title: string; variantLabel: string; quantity: number; stockAfter: number }[] = [];
     try {
       for (const line of orderItems) {
         const stockQuery = line.variantId
-          ? {
-              _id: line.productId, active: true, approved: true, stock: { $gte: line.quantity },
-              variants: { $elemMatch: { _id: line.variantId, stock: { $gte: line.quantity } } },
-            }
-          : {
-              _id: line.productId, active: true, approved: true, stock: { $gte: line.quantity },
-              $or: [{ variants: { $exists: false } }, { variants: { $size: 0 } }],
-            };
-        const stockUpdate = line.variantId
-          ? { $inc: { stock: -line.quantity, "variants.$.stock": -line.quantity } }
-          : { $inc: { stock: -line.quantity } };
+          ? { _id: line.productId, active: true, approved: true, stock: { $gte: line.quantity }, variants: { $elemMatch: { _id: line.variantId, stock: { $gte: line.quantity } } } }
+          : { _id: line.productId, active: true, approved: true, stock: { $gte: line.quantity }, $or: [{ variants: { $exists: false } }, { variants: { $size: 0 } }] };
+        const stockUpdate = line.variantId ? { $inc: { stock: -line.quantity, "variants.$.stock": -line.quantity } } : { $inc: { stock: -line.quantity } };
         const updated = await Product.findOneAndUpdate(stockQuery, stockUpdate, { new: true });
         if (!updated) throw new Error("Stock changed during checkout. Please try again.");
-        reserved.push({ id: String(line.productId), ...(line.variantId ? { variantId: String(line.variantId) } : {}), quantity: line.quantity });
+        reserved.push({ id: String(line.productId), ...(line.variantId ? { variantId: String(line.variantId) } : {}), title: line.title, variantLabel: line.variantLabel ?? "", quantity: line.quantity, stockAfter: updated.stock });
       }
       const deliveryAccess = customerId ? undefined : createDeliveryAccessKey();
-      const deliveryCharge = await resolveDefaultDeliveryCharge();
+      const deliveryConfig = await resolveDeliveryRuleConfig();
+      const divisionName = (location?.division.name ?? submittedLocation.division ?? "").toLowerCase();
+      const inferredArea: "inside_dhaka" | "outside_dhaka" = divisionName.includes("dhaka") ? "inside_dhaka" : "outside_dhaka";
+      const deliveryArea = parsed.data.deliveryArea ?? (hasLocationIds || divisionName ? inferredArea : "inside_dhaka");
       const subtotal = orderItems.reduce((sum, item) => sum + item.lineTotal, 0);
+      const deliveryCharge = calculateDeliveryCharge(deliveryConfig, subtotal, deliveryArea);
       let coinDiscount = 0;
       let coinsRedeemed = 0;
       const requestedRedeem = Math.floor(Number(parsed.data.redeemCoins || 0));
@@ -213,6 +228,10 @@ export async function POST(request: Request) {
       }
       const total = Math.max(0, subtotal + deliveryCharge - coinDiscount - voucherDiscount);
       const { division, district, upazila, area, address, union, ...customerDetails } = submittedLocation;
+      const paymentMethod = parsed.data.paymentMethod;
+      const trx = (parsed.data.paymentTransactionId || parsed.data.bkashTransactionId || "").trim().toUpperCase();
+      const senderNum = (parsed.data.paymentSenderNumber || parsed.data.bkashSenderNumber || "").trim();
+      const senderInfo = (parsed.data.paymentSenderAccountInfo || "").trim();
       const order = await Order.create({
         customer: customerId,
         customerInfo: {
@@ -239,32 +258,35 @@ export async function POST(request: Request) {
         total,
         ...(coinDiscount > 0 ? { coinDiscount, coinsRedeemed } : {}),
         ...(voucherDiscount > 0 && appliedVoucherCode ? { voucherDiscount, voucherCode: appliedVoucherCode } : {}),
+        paymentMethod,
+        ...(paymentMethod !== "COD" ? { payment: { method: paymentMethod.toLowerCase() as "bkash" | "nagad" | "rocket" | "bank", transactionId: trx, senderNumber: senderNum, senderAccountInfo: senderInfo, amount: total, status: "pending" as const } } : {}),
         ...(deliveryAccess ? { delivery: { accessKeyHash: deliveryAccess.hash } } : {}),
       });
       if (coinsRedeemed > 0 && customerId) {
         const dec = await UserWallet.updateOne({ userId: customerId, balanceCoins: { $gte: coinsRedeemed } }, { $inc: { balanceCoins: -coinsRedeemed, totalRedeemedCoins: coinsRedeemed } });
         if (!dec.modifiedCount) throw new Error("Insufficient coin balance.");
-        await CoinTransaction.create({
-          userId: customerId,
-          orderId: order._id,
-          amount: -coinsRedeemed,
-          type: "redeem",
-          description: `Coins redeemed for order ${String(order._id)} (discount ৳${coinDiscount.toLocaleString("en-BD")})`,
-        });
+        await CoinTransaction.create({ userId: customerId, orderId: order._id, amount: -coinsRedeemed, type: "redeem", description: `Coins redeemed for order ${String(order._id)} (discount ৳${coinDiscount.toLocaleString("en-BD")})` });
       }
       if (appliedVoucherId && customerId) {
         const used = await markVoucherUsed(appliedVoucherId, customerId, String(order._id));
         if (!used) throw new Error("Voucher could not be applied. It may have been used or expired.");
       }
-      return Response.json({
-        item: { _id: String(order._id) },
-        ...(deliveryAccess ? { deliveryAccessKey: deliveryAccess.key } : {}),
-      }, { status: 201 });
+      await recordStockMovements(reserved.map((entry) => ({
+        productId: entry.id, variantId: entry.variantId, productTitle: entry.title, variantLabel: entry.variantLabel,
+        delta: -entry.quantity, stockAfter: entry.stockAfter, reason: "order_placed" as const, orderId: order._id,
+        actorId: customerId ?? undefined, actorRole: customerId ? "customer" : "guest", note: "অর্ডার প্লেস",
+      })));
+      return Response.json({ item: { _id: String(order._id) }, ...(deliveryAccess ? { deliveryAccessKey: deliveryAccess.key } : {}) }, { status: 201 });
     } catch (stockError) {
       for (const entry of reserved) {
         if (entry.variantId) await Product.updateOne({ _id: entry.id, "variants._id": entry.variantId }, { $inc: { stock: entry.quantity, "variants.$.stock": entry.quantity } });
         else await Product.updateOne({ _id: entry.id }, { $inc: { stock: entry.quantity } });
       }
+      await recordStockMovements(reserved.map((entry) => ({
+        productId: entry.id, variantId: entry.variantId, productTitle: entry.title, variantLabel: entry.variantLabel,
+        delta: entry.quantity, reason: "order_rollback" as const, actorId: customerId ?? undefined,
+        actorRole: customerId ? "customer" : "guest", note: "অর্ডার ব্যর্থ · স্টক ফেরত",
+      })));
       throw stockError;
     }
   } catch (error) {
@@ -275,5 +297,3 @@ export async function POST(request: Request) {
     return apiError(error);
   }
 }
-
-

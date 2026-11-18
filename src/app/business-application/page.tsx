@@ -1,6 +1,9 @@
-﻿import { BusinessApplicationForm } from "@/components/business-application-form";
+﻿"use client";
 
-export const metadata = { title: "Reseller & Wholesaler Application" };
+import { BusinessApplicationForm } from "@/components/business-application-form";
+import { useStore } from "@/components/store-context";
+
 export default function BusinessApplicationPage() {
-  return <div className="page-shell"><p className="breadcrumb">Home / Reseller & Wholesaler</p><h1 className="page-title">Apply as Reseller or Wholesaler</h1><p className="subtle" style={{ marginBottom: 25 }}>Submit your business information. Admin approval is required before reseller/wholesaler access is activated.</p><BusinessApplicationForm /></div>;
+  const { t } = useStore();
+  return <div className="page-shell"><p className="breadcrumb">{t("home")} / {t("resellerWholesaler")}</p><h1 className="page-title">{t("businessApplicationTitle")}</h1><p className="subtle" style={{ marginBottom: 25 }}>{t("businessApplicationIntro")}</p><BusinessApplicationForm /></div>;
 }

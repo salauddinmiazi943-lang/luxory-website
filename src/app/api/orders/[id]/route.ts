@@ -7,7 +7,7 @@ import { createDeliveryAuditEntry } from "@/lib/delivery-audit";
 import { aggregateOrderStatus } from "@/lib/order-status";
 import { verifyDeliveryAccessKey } from "@/lib/delivery-security";
 import { awardOrderCoinsIfEligible } from "@/lib/coin-rewards";
-import { issueRewardVouchersIfEligible } from "@/lib/reward-vouchers";
+import { recordStockMovements } from "@/lib/stock-movements";
 import { orderIdFilter } from "@/lib/order-id";
 
 const schema = z.object({
@@ -72,13 +72,13 @@ export async function PATCH(request: Request, { params }: Context) {
     const order = await Order.findOne(orderFilter);
     if (!order) return Response.json({ error: "Order not found" }, { status: 404 });
     const previousStatus = order.status;
-    const restock: { productId: string; variantId?: string; quantity: number }[] = [];
+    const restock: { productId: string; variantId?: string; quantity: number; title: string; variantLabel: string }[] = [];
     if (admin) {
       if (order.items.some((item) => !canTransition(item.status, parsed.data.status))) {
         return Response.json({ error: "Order status cannot move backward or change after completion" }, { status: 409 });
       }
       if (parsed.data.status === "cancelled") {
-        order.items.filter((item) => item.status !== "cancelled").forEach((item) => restock.push({ productId: String(item.productId), ...(item.variantId ? { variantId: String(item.variantId) } : {}), quantity: item.quantity }));
+        order.items.filter((item) => item.status !== "cancelled").forEach((item) => restock.push({ productId: String(item.productId), ...(item.variantId ? { variantId: String(item.variantId) } : {}), quantity: item.quantity, title: item.title, variantLabel: item.variantLabel ?? "" }));
       }
       order.status = parsed.data.status;
       order.items.forEach((item) => { item.status = parsed.data.status; });
@@ -87,7 +87,7 @@ export async function PATCH(request: Request, { params }: Context) {
       for (const item of order.items) {
         if (String(item.vendorId) === access.user.id) {
           if (!canTransition(item.status, parsed.data.status)) continue;
-          if (parsed.data.status === "cancelled" && item.status !== "cancelled") restock.push({ productId: String(item.productId), ...(item.variantId ? { variantId: String(item.variantId) } : {}), quantity: item.quantity });
+          if (parsed.data.status === "cancelled" && item.status !== "cancelled") restock.push({ productId: String(item.productId), ...(item.variantId ? { variantId: String(item.variantId) } : {}), quantity: item.quantity, title: item.title, variantLabel: item.variantLabel ?? "" });
           item.status = parsed.data.status;
           updated = true;
         }
@@ -112,6 +112,18 @@ export async function PATCH(request: Request, { params }: Context) {
       { $inc: { stock: item.quantity, ...(item.variantId ? { "variants.$[variant].stock": item.quantity } : {}) } },
       item.variantId ? { arrayFilters: [{ "variant._id": item.variantId }] } : undefined,
     )));
+    await recordStockMovements(restock.map((item) => ({
+      productId: item.productId,
+      variantId: item.variantId,
+      productTitle: item.title,
+      variantLabel: item.variantLabel,
+      delta: item.quantity,
+      reason: "order_cancelled" as const,
+      orderId: order._id,
+      actorId: access.user.id,
+      actorRole: access.user.role,
+      note: "অর্ডার বাতিল · স্টক ফেরত",
+    })));
     return Response.json({ item: order });
   } catch (error) {
     console.error("PATCH /api/orders/[id] error:", error);

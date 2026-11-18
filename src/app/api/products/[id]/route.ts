@@ -5,6 +5,7 @@ import { getSession, hasPermission, requireUser } from "@/lib/auth";
 import { apiError, cloudinaryUrl, readJson, translated } from "@/lib/http";
 import mongoose from "mongoose";
 import { isValidQuantity, productUnits } from "@/lib/product-units";
+import { recordStockMovements } from "@/lib/stock-movements";
 
 const localeText = z.object({ en: z.string().trim().min(1).max(5000), bn: z.string().trim().max(5000).optional() });
 const productVariant = z.object({
@@ -123,8 +124,22 @@ export async function PATCH(request: Request, { params }: Context) {
         changes.approved = true;
       }
     }
+    const previousStock = item.stock;
     Object.assign(item, changes);
     await item.save();
+    if (typeof changes.stock === "number" && changes.stock !== previousStock) {
+      await recordStockMovements([{
+        productId: item._id,
+        productTitle: item.title?.en ?? "",
+        delta: changes.stock - previousStock,
+        stockBefore: previousStock,
+        stockAfter: changes.stock,
+        reason: "product_updated",
+        actorId: access.user.id,
+        actorRole: access.user.role,
+        note: "স্টক আপডেট",
+      }]);
+    }
     return Response.json({ item });
   } catch (error) {
     return apiError(error);

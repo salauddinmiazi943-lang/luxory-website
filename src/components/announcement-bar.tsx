@@ -13,7 +13,7 @@ type Announcement = {
 };
 
 export function AnnouncementBar() {
-  const { t, locale } = useStore();
+  const { locale } = useStore();
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
 
   useEffect(() => {
@@ -31,26 +31,36 @@ export function AnnouncementBar() {
     { _id: "default", title: { en: "Today's Offer", bn: "আজকের অফার" }, link: "/products", active: true }
   ];
 
-  if (displayAnnouncements.length === 0) return null;
+  // একটি group-কে এতটুকু চওড়া করুন যাতে পুরো bar ভরে যায় — নাহলে খুব কম item হলে
+  // লেখাগুলোর মাঝখানে ফাঁকা জায়গা দেখায় এবং scroll-টা এলোমেলো লাগে।
+  const minItems = 6;
+  const copies = Math.max(1, Math.ceil(minItems / displayAnnouncements.length));
+  const fill = Array.from({ length: copies }, () => displayAnnouncements).flat();
+
+  if (fill.length === 0) return null;
 
   return (
     <section className="announcement-bar">
       <div className="announcement-inner">
         <div className="announcement-track" aria-live="off">
-          {[...displayAnnouncements, ...displayAnnouncements].map((item, index) => {
-            const title = item.title?.[locale] ?? item.title.en ?? "";
-            return (
-              <Link
-                key={`${item._id}-${index}`}
-                href={item.link || "/products"}
-                className="announcement-item"
-                aria-label={title}
-                tabIndex={index >= displayAnnouncements.length ? -1 : undefined}
-              >
-                {title}
-              </Link>
-            );
-          })}
+          {[0, 1].map((copy) => (
+            <div className="announcement-group" key={copy} aria-hidden={copy === 1 || undefined}>
+              {fill.map((item, index) => {
+                const title = item.title?.[locale] ?? item.title.en ?? "";
+                return (
+                  <Link
+                    key={`${copy}-${item._id}-${index}`}
+                    href={item.link || "/products"}
+                    className="announcement-item"
+                    aria-label={title}
+                    tabIndex={copy === 1 ? -1 : undefined}
+                  >
+                    {title}
+                  </Link>
+                );
+              })}
+            </div>
+          ))}
         </div>
       </div>
     </section>

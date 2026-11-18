@@ -35,6 +35,9 @@ yarn-error.log*
 !.env.example
 !.env.staging.example
 
+# local database/code backups (never commit)
+/backups/
+
 # vercel
 .vercel
 

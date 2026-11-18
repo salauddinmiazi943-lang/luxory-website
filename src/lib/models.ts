@@ -1,6 +1,7 @@
 import mongoose, { Schema, models, model } from "mongoose";
 import type { Model, Types } from "mongoose";
 import { productUnits } from "@/lib/product-units";
+import { ADMIN_PERMISSIONS } from "@/lib/permissions";
 
 export type AppRole = "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler";
 export type OrderStatus = "pending" | "confirmed" | "shipped" | "delivered" | "failed" | "cancelled";
@@ -30,6 +31,11 @@ type UserRecord = {
   name: string; email: string; passwordHash: string; employeeId?: string; phone?: string; address?: string; shopName?: string;
   role: AppRole; permissions: string[]; status: "active" | "inactive" | "suspended" | "pending" | "rejected"; cart?: CartEntry[];
   savedAddresses?: SavedCustomerAddress[];
+  passwordResetTokenHash?: string | null;
+  passwordResetExpiresAt?: Date | null;
+  passwordResetOtpHash?: string | null;
+  passwordResetOtpExpiresAt?: Date | null;
+  passwordResetOtpAttempts?: number | null;
 };
 type OrderLine = {
   productId: Types.ObjectId; vendorId?: Types.ObjectId; variantId?: Types.ObjectId; variantLabel?: string;
@@ -51,7 +57,19 @@ type OrderRecord = {
     divisionId?: string; divisionBn?: string; districtId?: string; districtBn?: string;
     upazilaId?: string; upazilaBn?: string; unionId?: string; union?: string; unionBn?: string;
   };
-  items: OrderLine[]; subtotal?: number; deliveryCharge?: number; coinDiscount?: number; coinsRedeemed?: number; voucherDiscount?: number; voucherCode?: string; total: number; paymentMethod: "COD"; status: OrderStatus | "partially_delivered";
+  items: OrderLine[]; subtotal?: number; deliveryCharge?: number; coinDiscount?: number; coinsRedeemed?: number; voucherDiscount?: number; voucherCode?: string;   total: number; paymentMethod: "COD" | "BKASH" | "NAGAD" | "ROCKET" | "BANK";
+  payment?: {
+    method: "bkash" | "nagad" | "rocket" | "bank";
+    transactionId: string;
+    senderNumber: string;
+    senderAccountInfo?: string;
+    amount: number;
+    status: "pending" | "verified" | "rejected";
+    verifiedBy?: Types.ObjectId;
+    verifiedAt?: Date;
+    rejectReason?: string;
+  };
+  status: OrderStatus | "partially_delivered";
   deliveryAudit: DeliveryAuditEntry[];
   delivery: {
     verificationStatus: "not_required" | "pending" | "verified" | "flagged";
@@ -190,8 +208,13 @@ const userSchema = new Schema<UserRecord>({
   },
   shopName: { type: String, trim: true, maxlength: 120 },
   role: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer", "reseller", "wholesaler"], default: "customer", index: true },
-  permissions: [{ type: String, enum: ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_delivery_staff", "manage_vendors", "view_messages"] }],
+  permissions: [{ type: String, enum: [...ADMIN_PERMISSIONS] }],
   status: { type: String, enum: ["active", "inactive", "suspended", "pending", "rejected"], default: "active", index: true },
+  passwordResetTokenHash: { type: String, select: false, sparse: true, index: true },
+  passwordResetExpiresAt: { type: Date, select: false },
+  passwordResetOtpHash: { type: String, select: false },
+  passwordResetOtpExpiresAt: { type: Date, select: false },
+  passwordResetOtpAttempts: { type: Number, default: 0, select: false },
   cart: { type: [{
     productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     variantId: { type: Schema.Types.ObjectId },
@@ -327,7 +350,18 @@ const orderSchema = new Schema<OrderRecord>({
   voucherDiscount: { type: Number, min: 0, default: 0 },
   voucherCode: { type: String, trim: true, maxlength: 40 },
   total: { type: Number, required: true, min: 0 },
-  paymentMethod: { type: String, enum: ["COD"], default: "COD" },
+  paymentMethod: { type: String, enum: ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"], default: "COD" },
+  payment: {
+    method: { type: String, enum: ["bkash", "nagad", "rocket", "bank"], default: "bkash" },
+    transactionId: { type: String, trim: true, uppercase: true, maxlength: 40, default: "" },
+    senderNumber: { type: String, trim: true, maxlength: 30, default: "" },
+    senderAccountInfo: { type: String, trim: true, maxlength: 200, default: "" },
+    amount: { type: Number, min: 0, default: 0 },
+    status: { type: String, enum: ["pending", "verified", "rejected"], default: "pending", index: true },
+    verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    verifiedAt: { type: Date },
+    rejectReason: { type: String, trim: true, maxlength: 300, default: "" },
+  },
   status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "failed", "cancelled", "partially_delivered"], default: "pending", index: true },
   deliveryAudit: { type: [deliveryAuditSchema], default: [] },
   delivery: { type: deliverySchema, default: () => ({}) },
@@ -363,6 +397,9 @@ const applicationSchema = new Schema({
 const contactSchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 120 },
   email: { type: String, required: true, lowercase: true, trim: true },
+  phone: { type: String, trim: true, maxlength: 30, default: "" },
+  address: { type: String, trim: true, maxlength: 1000, default: "" },
+  inquiryType: { type: String, trim: true, maxlength: 40, default: "" },
   subject: { type: String, required: true, trim: true, maxlength: 160 },
   message: { type: String, required: true, trim: true, maxlength: 4000 },
   read: { type: Boolean, default: false },
@@ -400,9 +437,26 @@ export const ProductComment = models.ProductComment || model("ProductComment", p
 export const Order: Model<OrderRecord> = (models.Order as Model<OrderRecord> | undefined) || model<OrderRecord>("Order", orderSchema);
 const deliverySettingsSchema = new Schema({
   auditFrequencyPercent: { type: Number, required: true, min: 0, max: 100, default: 0 },
+  defaultDeliveryCharge: { type: Number, min: 0, max: 100000, default: 60 },
+  deliveryChargeEnabled: { type: Boolean, default: true },
+  insideDhakaCharge: { type: Number, min: 0, max: 100000, default: 60 },
+  outsideDhakaCharge: { type: Number, min: 0, max: 100000, default: 120 },
+  freeDeliveryEnabled: { type: Boolean, default: false },
+  freeDeliveryThreshold: { type: Number, min: 0, max: 10000000, default: 5000 },
   updatedBy: { type: String, required: true, maxlength: 64 },
 }, { timestamps: true });
 export const DeliverySettings = models.DeliverySettings || model("DeliverySettings", deliverySettingsSchema);
+
+const paymentMethodSettingSchema = new Schema({
+  method: { type: String, enum: ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"], required: true, unique: true },
+  label: { type: String, trim: true, maxlength: 120, default: "" },
+  enabled: { type: Boolean, default: true },
+  accountNumber: { type: String, trim: true, maxlength: 120, default: "" },
+  accountName: { type: String, trim: true, maxlength: 120, default: "" },
+  instructions: { type: String, trim: true, maxlength: 1000, default: "" },
+  updatedBy: { type: String, trim: true, maxlength: 64, default: "" },
+}, { timestamps: true });
+export const PaymentMethodSetting = models.PaymentMethodSetting || model("PaymentMethodSetting", paymentMethodSettingSchema);
 export const VendorApplication = models.VendorApplication || model("VendorApplication", applicationSchema);
 export const ContactMessage = models.ContactMessage || model("ContactMessage", contactSchema);
 
@@ -506,3 +560,86 @@ const rewardVoucherSchema = new Schema<RewardVoucherRecord>({
 rewardVoucherSchema.index({ userId: 1, status: 1, createdAt: -1 });
 
 export const RewardVoucher: Model<RewardVoucherRecord> = (models.RewardVoucher as Model<RewardVoucherRecord> | undefined) || model<RewardVoucherRecord>("RewardVoucher", rewardVoucherSchema);
+
+
+type StockMovementRecord = {
+  productId: mongoose.Types.ObjectId;
+  variantId?: mongoose.Types.ObjectId;
+  productTitle: string;
+  variantLabel: string;
+  delta: number;
+  stockBefore: number | null;
+  stockAfter: number | null;
+  reason: "product_created" | "product_updated" | "order_placed" | "order_cancelled" | "order_rollback" | "return_restocked";
+  orderId?: mongoose.Types.ObjectId;
+  actorId?: mongoose.Types.ObjectId;
+  actorRole?: string;
+  note: string;
+  createdAt?: Date;
+};
+
+const stockMovementSchema = new Schema<StockMovementRecord>({
+  productId: { type: Schema.Types.ObjectId, ref: "Product", required: true, index: true },
+  variantId: { type: Schema.Types.ObjectId },
+  productTitle: { type: String, required: true, trim: true, maxlength: 300, default: "" },
+  variantLabel: { type: String, trim: true, maxlength: 60, default: "" },
+  delta: { type: Number, required: true },
+  stockBefore: { type: Number, default: null },
+  stockAfter: { type: Number, default: null },
+  reason: { type: String, enum: ["product_created", "product_updated", "order_placed", "order_cancelled", "order_rollback", "return_restocked"], required: true, index: true },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", index: true },
+  actorId: { type: Schema.Types.ObjectId, ref: "User" },
+  actorRole: { type: String, trim: true, maxlength: 32, default: "" },
+  note: { type: String, trim: true, maxlength: 500, default: "" },
+}, { timestamps: true });
+stockMovementSchema.index({ productId: 1, createdAt: -1 });
+stockMovementSchema.index({ createdAt: -1 });
+stockMovementSchema.index({ orderId: 1, createdAt: -1 });
+
+export const StockMovement: Model<StockMovementRecord> = (models.StockMovement as Model<StockMovementRecord> | undefined) || model<StockMovementRecord>("StockMovement", stockMovementSchema);
+
+// --- Wholesale & Reseller Order Request System (additive) ---
+export type TradeRequestStatus = "new_request" | "discussion" | "price_negotiation" | "approved" | "rejected" | "order_confirmed" | "completed";
+export type TradeRequestRole = "reseller" | "wholesaler";
+
+const tradeRequestItemSchema = new Schema({
+  productId: { type: String, trim: true, maxlength: 64 },
+  title: { type: String, required: true, trim: true, maxlength: 300 },
+  quantity: { type: Number, required: true, min: 0.01, max: 1_000_000 },
+  unit: { type: String, trim: true, maxlength: 30, default: "" },
+  variantLabel: { type: String, trim: true, maxlength: 120, default: "" },
+  requestedVariant: { type: String, trim: true, maxlength: 300, default: "" },
+  image: { type: String, trim: true, maxlength: 2000, default: "" },
+}, { _id: false });
+
+const tradeRequestMessageSchema = new Schema({
+  senderId: { type: String, required: true, trim: true, maxlength: 64 },
+  senderRole: { type: String, enum: ["reseller", "wholesaler", "admin", "super_admin"], required: true },
+  senderName: { type: String, required: true, trim: true, maxlength: 120 },
+  body: { type: String, required: true, trim: true, maxlength: 4000 },
+  readByAdmin: { type: Boolean, default: false },
+  readByRequester: { type: Boolean, default: false },
+  createdAt: { type: Date, required: true, default: Date.now },
+}, { _id: true });
+
+const tradeOrderRequestSchema = new Schema({
+  requester: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  requesterRole: { type: String, enum: ["reseller", "wholesaler"], required: true, index: true },
+  requesterName: { type: String, required: true, trim: true, maxlength: 120 },
+  requesterEmail: { type: String, required: true, trim: true, lowercase: true, maxlength: 254 },
+  contactNumber: { type: String, required: true, trim: true, maxlength: 40 },
+  deliveryLocation: { type: String, required: true, trim: true, maxlength: 1000 },
+  customerMessage: { type: String, trim: true, maxlength: 4000, default: "" },
+  items: { type: [tradeRequestItemSchema], default: [] },
+  status: { type: String, enum: ["new_request", "discussion", "price_negotiation", "approved", "rejected", "order_confirmed", "completed"], default: "new_request", index: true },
+  messages: { type: [tradeRequestMessageSchema], default: [] },
+  proposedItems: { type: [{ title: { type: String, trim: true, maxlength: 300, default: "" }, quantity: { type: Number, min: 0 }, unitPrice: { type: Number, min: 0 }, note: { type: String, trim: true, maxlength: 300, default: "" } }], default: [] },
+  proposedDeliveryCharge: { type: Number, min: 0 },
+  proposedTotal: { type: Number, min: 0 },
+  negotiationNote: { type: String, trim: true, maxlength: 2000, default: "" },
+  adminUnread: { type: Boolean, default: true, index: true },
+  requesterUnread: { type: Boolean, default: false, index: true },
+}, { timestamps: true });
+tradeOrderRequestSchema.index({ createdAt: -1 });
+
+export const TradeOrderRequest = models.TradeOrderRequest || model("TradeOrderRequest", tradeOrderRequestSchema);

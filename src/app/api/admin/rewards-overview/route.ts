@@ -4,6 +4,16 @@ import { CoinTransaction, RewardVoucher, User, UserWallet } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
 import { apiError } from "@/lib/http";
 
+type PopulatedUser = { name?: string; email?: string; role?: string };
+type TxRow = {
+  _id: unknown; amount: number; type: string; description?: string; createdAt?: Date | string;
+  orderId?: unknown; userId?: PopulatedUser | null;
+};
+type VoucherRow = {
+  _id: unknown; voucherCode: string; amount?: number; minOrderAmount?: number; status: string;
+  expiresAt?: Date | string; createdAt?: Date | string; usedAt?: Date | string; userId?: PopulatedUser | null;
+};
+
 export async function GET() {
   try {
     const access = await requireUser(["super_admin"]);
@@ -33,15 +43,15 @@ export async function GET() {
       coins: { totalEarned: w.totalEarned || 0, totalRedeemed: w.totalRedeemed || 0, totalBalance: w.totalBalance || 0 },
       vouchers: voucherStats,
       roles: { activeResellers, activeWholesalers },
-      recentTransactions: (recentTx as any[]).map((tx) => ({
+      recentTransactions: (recentTx as unknown as TxRow[]).map((tx) => ({
         _id: String(tx._id), amount: tx.amount, type: tx.type, description: tx.description,
         createdAt: tx.createdAt, orderId: tx.orderId ? String(tx.orderId) : null,
-        user: tx.userId ? { name: (tx.userId as any).name, email: (tx.userId as any).email, role: (tx.userId as any).role } : null,
+        user: tx.userId ? { name: tx.userId.name, email: tx.userId.email, role: tx.userId.role } : null,
       })),
-      recentVouchers: (recentVouchers as any[]).map((v) => ({
+      recentVouchers: (recentVouchers as unknown as VoucherRow[]).map((v) => ({
         _id: String(v._id), voucherCode: v.voucherCode, amount: v.amount, minOrderAmount: v.minOrderAmount,
         status: v.status, expiresAt: v.expiresAt, createdAt: v.createdAt, usedAt: v.usedAt,
-        user: v.userId ? { name: (v.userId as any).name, email: (v.userId as any).email, role: (v.userId as any).role } : null,
+        user: v.userId ? { name: v.userId.name, email: v.userId.email, role: v.userId.role } : null,
       })),
     });
   } catch (error) {

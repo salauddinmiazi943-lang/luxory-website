@@ -42,7 +42,7 @@ export async function POST(request: Request) {
     const wallet = await UserWallet.findOne({ userId }).lean();
     return NextResponse.json({
       ok: true,
-      user: { id: String(target._id), name: (target as any).name, email: (target as any).email, role: (target as any).role },
+      user: { id: String(target._id), name: target.name, email: target.email, role: target.role },
       wallet: { balanceCoins: wallet?.balanceCoins ?? 0, totalEarnedCoins: wallet?.totalEarnedCoins ?? 0, totalRedeemedCoins: wallet?.totalRedeemedCoins ?? 0 },
     });
   } catch (error) {
