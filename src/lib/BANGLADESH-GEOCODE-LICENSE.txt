@@ -1,0 +1,57 @@
+Bangladesh Locations Dataset
+Source: https://github.com/HedaetShahriar/bangladesh-locations-dataset
+Pinned revision: 0d3116a7f59be5b2450742432805df2ab505043e
+Source data file: data/bd_locations.json
+Source data SHA: 3bb52dd0c8ce43dc2df6e33495be4634d4f21649
+Dataset version: 1.5.0
+Dataset license: MIT
+Copyright (c) 2026 MD. HEDAET SHAHRIAR HIMON
+
+Imported into src/lib/bangladesh-locations.json:
+- 8 divisions
+- 64 districts
+- 502 upazila records
+- 74 records typed as metropolitan thana
+
+Only the Division -> District -> Upazila/Thana hierarchy is included. Union,
+area, ward, village, boundary, coordinate, alias, and postal-code data is not
+included in the checkout dataset.
+
+The upstream README describes the hierarchy as compiled from the bd_geo_code
+database and public sources; it also references ISO 3166-2:BD codes, Wikidata,
+geoBoundaries, and Bangladesh Post Office postal-code lists. It is not an
+official government publication and warns that some names, spellings, and
+other values may be incorrect.
+
+The upstream README says 67 city thanas were added, while the pinned
+data/bd_locations.json actually contains 74 records with type "thana". The
+import and validation use the count present in the pinned data file. This
+count discrepancy is unverified and is not a claim that every metropolitan
+police station has been included.
+
+Upazila BBS-code coverage in the upstream metadata is reported as 466 of 502;
+newer administrative units may not yet be present in that register. The
+dataset's "fullCode" values are stable internal identifiers, not a guarantee
+that every record has an official BBS code.
+
+The MIT License (MIT)
+
+Copyright (c) 2026 MD. HEDAET SHAHRIAR HIMON
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

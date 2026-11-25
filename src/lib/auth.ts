@@ -55,15 +55,19 @@ export async function requireUser(roles?: AppRole[]) {
   let user;
   try {
     await connectDb();
-    user = await User.findById(session.id).select("status role permissions name email").lean();
+    user = await User.findById(session.id).select("status role permissions name email").maxTimeMS(10_000).lean();
   } catch (error) {
     console.error("Could not verify the current user.", error);
-    const message = error instanceof Error && error.message === "MONGO_USER and MONGO_PASS must be configured in .env.local"
+    const message = error instanceof Error && error.message === "MONGODB_URI or both MONGO_USER and MONGO_PASS must be configured"
       ? "Database is not configured"
       : "Could not verify the current user";
     return { error: Response.json({ error: message }, { status: 503 }) } as const;
   }
-  if (!user || user.status !== "active") return { error: Response.json({ error: "Account is inactive" }, { status: 401 }) } as const;
+  if (!user) return { error: Response.json({ error: "Account is inactive" }, { status: 401 }) } as const;
+  if (user.status !== "active") {
+    const suspended = user.status === "suspended";
+    return { error: Response.json({ error: suspended ? "Account is suspended" : "Account is inactive" }, { status: suspended ? 403 : 401 }) } as const;
+  }
   const current: SessionUser = { id: String(user._id), name: user.name, email: user.email, role: user.role, permissions: user.permissions ?? [] };
   if (roles && !roles.includes(current.role)) return { error: Response.json({ error: "Forbidden" }, { status: 403 }) } as const;
   return { user: current } as const;

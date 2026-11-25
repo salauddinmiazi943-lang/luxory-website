@@ -1,0 +1,83 @@
+"use client";
+
+import Link from "next/link";
+import Image from "next/image";
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { Heart } from "lucide-react";
+import { useStore, type WishlistItem } from "@/components/store-context";
+import { unitLabel } from "@/lib/product-units";
+
+export type ProductView = {
+  _id?: string; id?: string; slug: string; title: { en: string; bn?: string }; name?: string;
+  price: number; discountPrice?: number; images?: string[]; stock?: number; unit?: string;
+  category?: { name?: { en?: string; bn?: string } };
+  variants?: { _id?: string; label: string; price: number; stock: number }[];
+};
+
+const icons = ["◉", "◌", "⌚", "◈", "◉", "✦"];
+export function ProductCard({ product, index = 0 }: { product: ProductView; index?: number }) {
+  const { locale, t, addToCart, toggleWishlist, isWishlisted } = useStore();
+  const router = useRouter();
+  const id = product._id ?? product.id ?? product.slug;
+  const title = product.title ? product.title[locale] || product.title.en : product.name ?? "Product";
+  const image = product.images?.[0];
+  const validImage = Boolean(image?.startsWith("https://res.cloudinary.com/"));
+  const hasVariants = Boolean(product.variants?.length);
+  const hasDiscount = product.discountPrice != null;
+  const [selectedVariantId, setSelectedVariantId] = useState(
+    product.variants?.find((variant) => variant.stock > 0)?._id ?? "",
+  );
+  const selectedVariant = product.variants?.find((variant) => variant._id === selectedVariantId);
+  const price = selectedVariant?.price ?? (hasVariants ? Math.min(...product.variants!.map((variant) => variant.price)) : product.discountPrice ?? product.price);
+  const stock = selectedVariant?.stock ?? (hasVariants ? 0 : product.stock ?? 0);
+  const wishlisted = isWishlisted(id);
+  const wishlistItem: WishlistItem = { ...product, title: product.title ?? { en: title } };
+  const canPurchase = Boolean(product._id) && stock > 0 && (!hasVariants || Boolean(selectedVariant?._id));
+
+  function buyNow() {
+    if (!product._id || (hasVariants && !selectedVariant?._id)) return;
+    const params = new URLSearchParams({
+      buyNow: product._id,
+      quantity: "1",
+      ...(selectedVariant?._id ? { variantId: selectedVariant._id } : {}),
+    });
+    router.push(`/checkout?${params.toString()}`);
+  }
+
+  function addSelectedToCart() {
+    if (!canPurchase) return;
+    addToCart({
+      id,
+      slug: product.slug || id,
+      name: title,
+      image: image ?? "",
+      price,
+      unit: product.unit ?? "piece",
+      ...(selectedVariant?._id ? { variantId: selectedVariant._id, variantLabel: selectedVariant.label } : {}),
+    });
+  }
+
+  return <article className="product-card">
+    <Link href={product._id ? `/products/${product.slug || id}` : "/products"} className={`product-image product-tone-${index % 6}`}>
+      {validImage ? <Image src={image!} alt={title} fill sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 25vw" /> : <span className="product-placeholder">{icons[index % icons.length]}</span>}
+      {hasDiscount ? <span className="sale-tag">SALE</span> : null}
+    </Link>
+    <div className="product-meta"><span className="product-category">{product.category?.name?.[locale] || t("shop")}</span><div className="product-card-actions"><button type="button" className={`product-card-wishlist${wishlisted ? " is-active" : ""}`} aria-label={`${wishlisted ? "Remove from" : "Add to"} wishlist: ${title}`} aria-pressed={wishlisted} onClick={() => toggleWishlist(wishlistItem)}><Heart size={16} fill={wishlisted ? "currentColor" : "none"} /></button></div></div>
+    <Link href={product._id ? `/products/${product.slug || id}` : "/products"} className="product-title">{title}</Link>
+    {hasVariants && <label className="product-card-option">
+      <span>{t("productOption")}</span>
+      <select aria-label={`${t("productOption")}: ${title}`} value={selectedVariantId} onChange={(event) => setSelectedVariantId(event.target.value)}>
+        {!selectedVariant && <option value="">{t("productOption")}</option>}
+        {product.variants!.map((variant) => <option key={variant._id} value={variant._id ?? ""} disabled={variant.stock <= 0}>
+          {variant.label} · ৳{variant.price.toLocaleString("en-BD")}{variant.stock <= 0 ? ` · ${t("outOfStock")}` : ""}
+        </option>)}
+      </select>
+    </label>}
+    <div className="price-row"><strong>{hasVariants && !selectedVariant ? "From " : ""}৳{price.toLocaleString("en-BD")}</strong><span>/ {hasVariants ? selectedVariant?.label ?? t("productOption") : unitLabel(product.unit, locale)}</span>{!hasVariants && hasDiscount && <del>৳{product.price.toLocaleString("en-BD")}</del>}</div>
+    <div className="product-card-buy-actions">
+      <button type="button" className="button-primary" disabled={!canPurchase} onClick={buyNow}>{t("buyNow")}</button>
+      <button type="button" className="button-secondary" disabled={!canPurchase} onClick={addSelectedToCart}>{t("addToCart")}</button>
+    </div>
+  </article>;
+}

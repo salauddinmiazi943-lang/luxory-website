@@ -16,7 +16,7 @@ const cache =
 
 globalCache.mongooseCache = cache;
 
-export async function connectDb() {
+export async function connectDb(options: { autoIndex?: boolean } = {}) {
   const dnsServers = process.env.MONGO_DNS_SERVERS
     ?.split(",")
     .map((server) => server.trim())
@@ -42,7 +42,10 @@ export async function connectDb() {
     cache.promise = mongoose
       .connect(uri, {
         family: 4,
+        autoIndex: options.autoIndex ?? true,
         bufferCommands: false,
+        serverSelectionTimeoutMS: 10_000,
+        connectTimeoutMS: 10_000,
       })
       .catch((error: unknown) => {
         cache.promise = null;

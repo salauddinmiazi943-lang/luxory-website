@@ -6,8 +6,22 @@ import bn from "@/messages/bn.json";
 import { normalizeQuantity } from "@/lib/product-units";
 
 export type Locale = "en" | "bn";
-export type CartLine = { id: string; slug: string; name: string; image: string; price: number; quantity: number; unit?: string; variantId?: string; variantLabel?: string };
+export type CartLine = { id: string; slug: string; name: string; image: string; originalPrice?: number; price: number; quantity: number; unit?: string; variantId?: string; variantLabel?: string; variantImage?: string };
 export const cartLineKey = (line: Pick<CartLine, "id" | "variantId">) => `${line.id}:${line.variantId ?? ""}`;
+export type WishlistItem = {
+  _id?: string;
+  id?: string;
+  slug: string;
+  title: { en: string; bn?: string };
+  price: number;
+  discountPrice?: number;
+  images?: string[];
+  stock?: number;
+  unit?: string;
+  category?: { name?: { en?: string; bn?: string } };
+  variants?: { _id?: string; label: string; price: number; stock: number }[];
+};
+const wishlistItemKey = (item: Pick<WishlistItem, "_id" | "id" | "slug">) => item._id ?? item.id ?? item.slug;
 type StoreContextValue = {
   locale: Locale;
   setLocale: (locale: Locale) => void;
@@ -17,13 +31,18 @@ type StoreContextValue = {
   updateQuantity: (key: string, quantity: number) => void;
   removeFromCart: (key: string) => void;
   clearCart: () => void;
+  wishlist: WishlistItem[];
+  toggleWishlist: (item: WishlistItem) => void;
+  isWishlisted: (id: string) => boolean;
 };
 const Context = createContext<StoreContextValue | null>(null);
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>("en");
   const [cart, setCart] = useState<CartLine[]>([]);
+  const [wishlist, setWishlist] = useState<WishlistItem[]>([]);
   const [cartReady, setCartReady] = useState(false);
+  const [wishlistReady, setWishlistReady] = useState(false);
   const [syncCart, setSyncCart] = useState(false);
   const cartRef = useRef<CartLine[]>([]);
   useEffect(() => { cartRef.current = cart; }, [cart]);
@@ -63,12 +82,24 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     } catch (error) {
       console.warn("Could not read the saved cart.", error);
     }
+    let savedWishlist: WishlistItem[] = [];
+    try {
+      const parsedWishlist = JSON.parse(localStorage.getItem("eshop-wishlist") ?? "[]") as WishlistItem[];
+      if (Array.isArray(parsedWishlist)) savedWishlist = parsedWishlist;
+    } catch (error) {
+      console.warn("Could not read the saved wishlist.", error);
+    }
     const readyTimer = window.setTimeout(() => setCartReady(true), 0);
+    const wishlistReadyTimer = window.setTimeout(() => {
+      setWishlist(savedWishlist);
+      setWishlistReady(true);
+    }, 0);
     const syncTimer = window.setTimeout(() => { void syncServerCart(localCart); }, 0);
     const handleAuthChanged = () => { void syncServerCart(cartRef.current); };
     window.addEventListener("eshop:auth-changed", handleAuthChanged);
     return () => {
       window.clearTimeout(readyTimer);
+      window.clearTimeout(wishlistReadyTimer);
       window.clearTimeout(syncTimer);
       window.removeEventListener("eshop:auth-changed", handleAuthChanged);
     };
@@ -77,13 +108,26 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     if (cartReady) localStorage.setItem("eshop-cart", JSON.stringify(cart));
   }, [cart, cartReady]);
   useEffect(() => {
+    if (wishlistReady) localStorage.setItem("eshop-wishlist", JSON.stringify(wishlist));
+  }, [wishlist, wishlistReady]);
+  useEffect(() => {
     if (!syncCart || !cartReady) return;
     const timer = window.setTimeout(async () => {
+      // শুধু লগইন করা কাস্টমার গুলো কার্ট সার্ভারে সেভ করবে; অন্য রোল বা অনলাইন নেই ইউজার এর জন্য চুপচাপ বের হয়ে যাই।
+      const authResponse = await fetch("/api/auth/me");
+      if (!authResponse.ok) return;
+      const auth = await authResponse.json() as { user?: { role?: string } | null };
+      if (!auth.user || auth.user.role !== "customer") return;
+
       const response = await fetch("/api/cart", {
         method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ items: cart.map((item) => ({ productId: item.id, ...(item.variantId ? { variantId: item.variantId } : {}), quantity: item.quantity })) }),
       });
-      if (!response.ok) console.error("Could not save your cart to your account.");
+      if (!response.ok) {
+        // 401/403 আশা করা একটি Situation (ইউজার লগইন নেই বা কাস্টমার নেই)—লাল Console Error ওভারলে দেখাই না।
+        if (response.status === 401 || response.status === 403) return;
+        console.warn("Could not save your cart to your account.");
+      }
     }, 350);
     return () => window.clearTimeout(timer);
   }, [cart, cartReady, syncCart]);
@@ -92,6 +136,9 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     localStorage.setItem("eshop-locale", value);
     document.documentElement.lang = value;
   }, []);
+  useEffect(() => {
+    document.documentElement.lang = locale;
+  }, [locale]);
   const addToCart = useCallback((line: Omit<CartLine, "quantity"> & { quantity?: number }) => {
     setCart((current) => {
       const key = cartLineKey(line);
@@ -106,10 +153,18 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const removeFromCart = useCallback((key: string) => setCart((current) => current.filter((item) => cartLineKey(item) !== key)), []);
   const clearCart = useCallback(() => setCart([]), []);
+  const toggleWishlist = useCallback((item: WishlistItem) => {
+    const key = wishlistItemKey(item);
+    setWishlist((current) => current.some((saved) => wishlistItemKey(saved) === key)
+      ? current.filter((saved) => wishlistItemKey(saved) !== key)
+      : [...current, item]);
+  }, []);
+  const isWishlisted = useCallback((id: string) => wishlist.some((item) => wishlistItemKey(item) === id), [wishlist]);
   const value = useMemo(() => ({
     locale, setLocale, t: (key: keyof typeof en) => (locale === "bn" ? bn : en)[key],
     cart, addToCart, updateQuantity, removeFromCart, clearCart,
-  }), [locale, setLocale, cart, addToCart, updateQuantity, removeFromCart, clearCart]);
+    wishlist, toggleWishlist, isWishlisted,
+  }), [locale, setLocale, cart, addToCart, updateQuantity, removeFromCart, clearCart, wishlist, toggleWishlist, isWishlisted]);
   return <Context.Provider value={value}>{children}</Context.Provider>;
 }
 

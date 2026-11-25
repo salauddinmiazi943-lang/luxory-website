@@ -3,6 +3,7 @@ import { connectDb } from "@/lib/db";
 import { Product, User } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
+import { isValidQuantity } from "@/lib/product-units";
 
 const schema = z.object({ items: z.array(z.object({ productId: z.string().regex(/^[a-f\d]{24}$/i), variantId: z.string().regex(/^[a-f\d]{24}$/i).optional(), quantity: z.number().positive().max(100_000) })).max(30) })
   .superRefine((value, context) => {
@@ -21,7 +22,7 @@ export async function GET() {
     const items = lines.flatMap((line) => {
       const product = products.find((candidate) => String(candidate._id) === String(line.productId));
       if (!product) return [];
-      const variants = product.variants as { _id: unknown; stock: number; price: number; label: string }[] | undefined;
+      const variants = product.variants as { _id: unknown; stock: number; price: number; label: string; images?: string[] }[] | undefined;
       const variant = line.variantId ? variants?.find((option) => String(option._id) === String(line.variantId)) : undefined;
       if (line.variantId && !variant) return [];
       if (!line.variantId && variants?.length) return [];
@@ -30,7 +31,7 @@ export async function GET() {
       return [{
         id: String(product._id), slug: product.slug, name: product.title.en, image: product.images[0] ?? "",
         price, quantity: Math.min(line.quantity, stock), unit: product.unit ?? "piece",
-        ...(variant ? { variantId: String(variant._id), variantLabel: variant.label } : {}),
+        ...(variant ? { variantId: String(variant._id), variantLabel: variant.label, variantImage: variant.images?.[0] ?? "" } : {}),
       }].filter((item) => item.quantity > 0);
     });
     return Response.json({ items });
@@ -47,11 +48,14 @@ export async function PUT(request: Request) {
     if ("error" in parsed) return parsed.error;
     await connectDb();
     const productIds = parsed.data.items.map((item) => item.productId);
-    const products = await Product.find({ _id: { $in: productIds }, active: true, approved: true }).select("_id variants").lean();
+    const products = await Product.find({ _id: { $in: productIds }, active: true, approved: true }).select("_id variants unit").lean();
     if (products.length !== new Set(productIds).size) return Response.json({ error: "Cart contains an unavailable product" }, { status: 400 });
     for (const line of parsed.data.items) {
       const product = products.find((item) => String(item._id) === line.productId);
       if (!product) return Response.json({ error: "Cart contains an unavailable product" }, { status: 400 });
+      if (!isValidQuantity(product.unit, line.quantity)) {
+        return Response.json({ error: "Invalid quantity for the selected product unit" }, { status: 400 });
+      }
       const variants = product.variants as { _id: unknown }[] | undefined;
       if (line.variantId && !variants?.some((variant) => String(variant._id) === line.variantId)) {
         return Response.json({ error: "Cart contains an unavailable product option" }, { status: 400 });

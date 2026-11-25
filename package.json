@@ -7,14 +7,17 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "seed": "node --env-file=.env.local --import tsx scripts/seed.ts"
+    "seed": "node --env-file=.env.local --import tsx scripts/seed.ts",
+    "migrate:employee-id-index:staging": "node --env-file=.env.staging.local --import tsx scripts/migrations/employee-id-unique-index.ts"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "jose": "^6.2.14",
     "lucide-react": "^1.66.0",
+    "motion": "^14.14.0",
     "mongoose": "^9.11.4",
-    "next": "16.4.3",
+    "next": "16.4.6",
+    "nodemailer": "^10.6.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zod": "^4.6.7"
@@ -22,10 +25,11 @@
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^20",
+    "@types/nodemailer": "^8.0.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.4.3",
+    "eslint-config-next": "16.4.6",
     "tailwindcss": "^4",
     "tsx": "^4.23.15",
     "typescript": "^5"

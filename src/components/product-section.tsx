@@ -13,26 +13,28 @@ const fallbackProducts: ProductView[] = [
   { slug: "pulse-earbuds", title: { en: "Pulse wireless earbuds", bn: "পালস ওয়্যারলেস ইয়ারবাড" }, price: 3590, discountPrice: 2990 },
 ];
 
-export function ProductSection({ title, featured = false, bestSeller = false, categoryId, link = "/products" }: { title: string; featured?: boolean; bestSeller?: boolean; categoryId?: string; link?: string }) {
-  const [products, setProducts] = useState(categoryId ? [] : fallbackProducts);
+export function ProductSection({ title, featured = false, bestSeller = false, categoryId, discounted = false, link = "/products", eyebrow, limit = 4, allowFallback = true }: { title: string; featured?: boolean; bestSeller?: boolean; categoryId?: string; discounted?: boolean; link?: string; eyebrow?: string; limit?: number; allowFallback?: boolean }) {
+  const [products, setProducts] = useState<ProductView[]>(categoryId ? [] : (allowFallback ? fallbackProducts : []));
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const { t } = useStore();
   useEffect(() => {
-    const params = new URLSearchParams({ limit: "4" });
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (categoryId) params.set("category", categoryId);
+    if (discounted) params.set("discounted", "true");
     if (featured) params.set("featured", "true");
     else if (bestSeller) params.set("bestSeller", "true");
-    else if (categoryId) params.set("category", categoryId);
-    else params.set("sort", "new");
+    else if (!discounted) params.set("sort", "new");
     fetch(`/api/products?${params}`).then(async (response) => {
       if (!response.ok) throw new Error("Unable to load products");
       const payload = await response.json() as { items?: ProductView[] };
       setProducts(payload.items ?? []);
     }).catch(() => setLoadError(true)).finally(() => setLoaded(true));
-  }, [bestSeller, categoryId, featured]);
-  return <section className="section wrap"><div className="section-heading"><div><p className="eyebrow">{featured ? "HANDPICKED FOR YOU" : "FRESH FINDS"}</p><h2>{title}</h2></div><Link className="text-link" href={link}>{t("viewAll")} <ArrowRight size={16} /></Link></div>
-    {products.length ? <div className="product-grid">{products.map((product, index) => <ProductCard key={product._id ?? product.slug} product={product} index={index} />)}</div> : loaded && <p className="subtle">{t("noProducts")}</p>}
+  }, [bestSeller, categoryId, discounted, featured, limit]);
+  const show = products.length ? products : (!loaded && allowFallback && !categoryId ? fallbackProducts : []);
+  return <section className="section wrap"><div className="section-heading"><div><p className="eyebrow">{eyebrow ?? (discounted ? t("eyebrowOfferProducts") : featured ? t("eyebrowHandpicked") : t("eyebrowFreshFinds"))}</p><h2>{title}</h2></div><Link className="text-link" href={link}>{discounted ? t("viewAllOffers") : t("viewAll")} <ArrowRight size={16} /></Link></div>
+    {show.length ? <div className="product-grid">{show.map((product, index) => <ProductCard key={product._id ?? product.slug} product={product} index={index} />)}</div> : loaded && <p className="subtle">{t("noProducts")}</p>}
     {loadError && <p className="subtle">{t("catalogUnavailable")}</p>}
-    {!loaded && <p className="subtle center">Updating the collection…</p>}
+    {!loaded && <p className="subtle center">{t("updatingCollection")}</p>}
   </section>;
 }

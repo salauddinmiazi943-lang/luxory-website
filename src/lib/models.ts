@@ -1,22 +1,108 @@
-import { Schema, models, model } from "mongoose";
+import mongoose, { Schema, models, model } from "mongoose";
 import type { Model, Types } from "mongoose";
 import { productUnits } from "@/lib/product-units";
+import { ADMIN_PERMISSIONS } from "@/lib/permissions";
+import { VARIANT_TEMPLATE_KEYS } from "@/lib/variant-templates";
 
-export type AppRole = "super_admin" | "admin" | "vendor" | "customer";
-export type OrderStatus = "pending" | "confirmed" | "shipped" | "delivered" | "cancelled";
+export type AppRole = "super_admin" | "admin" | "vendor" | "delivery_staff" | "customer" | "reseller" | "wholesaler";
+export type OrderStatus = "pending" | "confirmed" | "shipped" | "delivered" | "failed" | "cancelled";
 type CartEntry = { productId: Types.ObjectId; variantId?: Types.ObjectId; quantity: number };
+type SavedCustomerAddress = {
+  _id?: Types.ObjectId;
+  label?: string;
+  name: string;
+  phone: string;
+  divisionId: string;
+  division: string;
+  divisionBn: string;
+  districtId: string;
+  district: string;
+  districtBn: string;
+  upazilaId?: string;
+  upazila: string;
+  upazilaBn?: string;
+  unionId?: string;
+  union?: string;
+  unionBn?: string;
+  area?: string;
+  address: string;
+  isDefault: boolean;
+};
 type UserRecord = {
-  name: string; email: string; passwordHash: string; phone?: string; address?: string; shopName?: string;
-  role: AppRole; permissions: string[]; status: "active" | "inactive"; cart?: CartEntry[];
+  name: string; email: string; passwordHash: string; employeeId?: string; phone?: string; address?: string; shopName?: string;
+  role: AppRole; permissions: string[]; status: "active" | "inactive" | "suspended" | "pending" | "rejected"; cart?: CartEntry[];
+  vendorProductPermissions?: {
+    productAddEnabled: boolean;
+    allowedCategoryIds: Types.ObjectId[];
+    deniedCategoryIds: Types.ObjectId[];
+    maxProducts: number;
+    requireApproval: boolean;
+  };
+  savedAddresses?: SavedCustomerAddress[];
+  passwordResetTokenHash?: string | null;
+  passwordResetExpiresAt?: Date | null;
+  passwordResetOtpHash?: string | null;
+  passwordResetOtpExpiresAt?: Date | null;
+  passwordResetOtpAttempts?: number | null;
 };
 type OrderLine = {
   productId: Types.ObjectId; vendorId?: Types.ObjectId; variantId?: Types.ObjectId; variantLabel?: string;
-  unit: string; title: string; image?: string; quantity: number; unitPrice: number; status: OrderStatus;
+  variantSku?: string; variantAttributeValues?: Record<string, unknown>; variantImages?: string[];
+  unit: string; title: string; image?: string; quantity: number; originalPrice?: number; unitPrice: number; discountPercent?: number; lineTotal?: number; status: OrderStatus;
+};
+type DeliveryAuditEntry = {
+  orderId: string; actorId: string; actorRole: AppRole; event: string; occurredAt: Date;
+  previousHash: string; hash: string; signature?: string; details?: string;
+};
+type DeliveryAssignment = { assignedTo: string; assignedBy: string; assignedAt: Date };
+type DeliveryAssignmentHistory = DeliveryAssignment & {
+  action: "assigned" | "reassigned"; previousStaffId?: string;
 };
 type OrderRecord = {
   customer?: Types.ObjectId;
-  customerInfo: { name: string; phone: string; address: string; notes?: string; email?: string };
-  items: OrderLine[]; total: number; paymentMethod: "COD"; status: OrderStatus;
+  customerInfo: {
+    name: string; phone: string; address: string; notes?: string; email?: string;
+    division?: string; district?: string; upazila?: string; area?: string;
+    divisionId?: string; divisionBn?: string; districtId?: string; districtBn?: string;
+    upazilaId?: string; upazilaBn?: string; unionId?: string; union?: string; unionBn?: string;
+  };
+  items: OrderLine[]; subtotal?: number; deliveryCharge?: number; coinDiscount?: number; coinsRedeemed?: number; voucherDiscount?: number; voucherCode?: string;   total: number; paymentMethod: "COD" | "BKASH" | "NAGAD" | "ROCKET" | "BANK";
+  payment?: {
+    method: "bkash" | "nagad" | "rocket" | "bank";
+    transactionId: string;
+    senderNumber: string;
+    senderAccountInfo?: string;
+    amount: number;
+    status: "pending" | "verified" | "rejected";
+    verifiedBy?: Types.ObjectId;
+    verifiedAt?: Date;
+    rejectReason?: string;
+  };
+  status: OrderStatus | "partially_delivered";
+  deliveryAudit: DeliveryAuditEntry[];
+  delivery: {
+    verificationStatus: "not_required" | "pending" | "verified" | "flagged";
+    accessKeyHash?: string;
+    assignment?: DeliveryAssignment;
+    assignmentHistory: DeliveryAssignmentHistory[];
+    deliveredAt?: Date; deliveredBy?: string; notes?: string;
+    failedAt?: Date; failedBy?: string; failedReason?: string;
+    reports: { _id?: Types.ObjectId; customerId: string; requestId?: string; reason: string; details?: string; createdAt: Date; status: "open" | "resolved"; resolvedBy?: string; resolvedAt?: Date }[];
+    notifications: { message: string; createdAt: Date; readAt?: Date }[];
+    handovers: {
+      _id?: Types.ObjectId; productId: Types.ObjectId; variantId?: Types.ObjectId; title: string;
+      assignedTo: string; assignedBy: string; assignedQuantity: number; acceptedQuantity: number;
+      deliveredQuantity: number; verifiedDeliveredQuantity: number; returnedQuantity: number;
+      missingQuantity: number; disputedQuantity: number; codDue: number; codCollected: number;
+      codSettled: number; codDisputed: number; acceptedAt?: Date; settledAt?: Date; settledBy?: string;
+    }[];
+    returns: {
+      _id?: Types.ObjectId; productId: Types.ObjectId; variantId?: Types.ObjectId; title: string;
+      expectedQuantity: number; countedQuantity: number; receivedBy: string; receivedAt: Date; notes?: string;
+      status: "pending_confirmation" | "confirmed"; condition?: "good" | "damaged" | "disputed";
+      confirmedBy?: string; confirmedAt?: Date; restockAppliedAt?: Date; handoverId?: Types.ObjectId;
+    }[];
+  };
 };
 
 const localized = {
@@ -24,63 +110,314 @@ const localized = {
   bn: { type: String, required: true, trim: true, maxlength: 5000 },
 };
 
+const deliveryAuditSchema = new Schema<DeliveryAuditEntry>({
+  orderId: { type: String, required: true, immutable: true },
+  actorId: { type: String, required: true, immutable: true },
+  actorRole: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer", "reseller", "wholesaler"], required: true, immutable: true },
+  event: { type: String, required: true, maxlength: 80, immutable: true },
+  occurredAt: { type: Date, required: true, immutable: true },
+  // The first audit entry uses an empty string to mark the start of the hash chain.
+  previousHash: { type: String, immutable: true },
+  hash: { type: String, required: true, immutable: true },
+  signature: { type: String, immutable: true },
+  details: { type: String, maxlength: 2000, immutable: true },
+}, { _id: false, versionKey: false });
+deliveryAuditSchema.pre("validate", function (this: mongoose.HydratedDocument<DeliveryAuditEntry>) {
+  if (typeof this.previousHash !== "string") {
+    this.invalidate("previousHash", "Path `previousHash` is required.");
+  }
+});
+
+const handoverSchema = new Schema({
+  productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
+  variantId: { type: Schema.Types.ObjectId },
+  title: { type: String, required: true, maxlength: 500 },
+  assignedTo: { type: String, required: true, maxlength: 64 },
+  assignedBy: { type: String, required: true, maxlength: 64 },
+  assignedQuantity: { type: Number, required: true, min: 0 },
+  acceptedQuantity: { type: Number, required: true, min: 0, default: 0 },
+  deliveredQuantity: { type: Number, required: true, min: 0, default: 0 },
+  verifiedDeliveredQuantity: { type: Number, required: true, min: 0, default: 0 },
+  returnedQuantity: { type: Number, required: true, min: 0, default: 0 },
+  missingQuantity: { type: Number, required: true, min: 0, default: 0 },
+  disputedQuantity: { type: Number, required: true, min: 0, default: 0 },
+  codDue: { type: Number, required: true, min: 0 },
+  codCollected: { type: Number, required: true, min: 0, default: 0 },
+  codSettled: { type: Number, required: true, min: 0, default: 0 },
+  codDisputed: { type: Number, required: true, min: 0, default: 0 },
+  acceptedAt: Date,
+  settledAt: Date,
+  settledBy: { type: String, maxlength: 64 },
+});
+
+const deliverySchema = new Schema({
+  verificationStatus: { type: String, enum: ["not_required", "pending", "verified", "flagged"], default: "not_required" },
+  accessKeyHash: { type: String, select: false },
+  assignment: {
+    assignedTo: { type: String, maxlength: 64 },
+    assignedBy: { type: String, maxlength: 64 },
+    assignedAt: Date,
+  },
+  assignmentHistory: [{
+    assignedTo: { type: String, required: true, maxlength: 64 },
+    assignedBy: { type: String, required: true, maxlength: 64 },
+    assignedAt: { type: Date, required: true },
+    action: { type: String, enum: ["assigned", "reassigned"], required: true },
+    previousStaffId: { type: String, maxlength: 64 },
+  }],
+  deliveredAt: Date,
+  deliveredBy: { type: String, maxlength: 64 },
+  notes: { type: String, trim: true, maxlength: 1000, default: "" },
+  failedAt: Date,
+  failedBy: { type: String, maxlength: 64 },
+  failedReason: { type: String, trim: true, maxlength: 500, default: "" },
+  reports: [{
+    customerId: { type: String, required: true, maxlength: 64 },
+    requestId: { type: String, maxlength: 64 },
+    reason: { type: String, required: true, enum: ["not_received", "late", "missing_items", "damaged", "other"] },
+    details: { type: String, trim: true, maxlength: 1000 },
+    createdAt: { type: Date, required: true, default: Date.now },
+    status: { type: String, enum: ["open", "resolved"], default: "open" },
+    resolvedBy: { type: String, maxlength: 64 },
+    resolvedAt: Date,
+  }],
+  notifications: [{
+    message: { type: String, required: true, maxlength: 500 },
+    createdAt: { type: Date, required: true, default: Date.now },
+    readAt: Date,
+  }],
+  handovers: { type: [handoverSchema], default: [] },
+  returns: [{
+    productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
+    variantId: { type: Schema.Types.ObjectId },
+    title: { type: String, required: true, maxlength: 500 },
+    expectedQuantity: { type: Number, required: true, min: 0 },
+    countedQuantity: { type: Number, required: true, min: 0 },
+    receivedBy: { type: String, required: true, maxlength: 64 },
+    receivedAt: { type: Date, required: true, default: Date.now },
+    notes: { type: String, trim: true, maxlength: 1000 },
+    status: { type: String, enum: ["pending_confirmation", "confirmed"], default: "pending_confirmation" },
+    condition: { type: String, enum: ["good", "damaged", "disputed"] },
+    confirmedBy: { type: String, maxlength: 64 },
+    confirmedAt: Date,
+    restockAppliedAt: Date,
+    handoverId: { type: Schema.Types.ObjectId },
+  }],
+});
+
+const vendorProductPermissionsSchema = new Schema({
+  productAddEnabled: { type: Boolean, default: false },
+  allowedCategoryIds: [{ type: Schema.Types.ObjectId, ref: "Category" }],
+  deniedCategoryIds: [{ type: Schema.Types.ObjectId, ref: "Category" }],
+  maxProducts: { type: Number, min: 0, max: 100_000, default: 0 },
+  requireApproval: { type: Boolean, default: true },
+}, { _id: false });
+
 const userSchema = new Schema<UserRecord>({
   name: { type: String, required: true, trim: true, maxlength: 120 },
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true, select: false },
   phone: { type: String, trim: true, maxlength: 30 },
   address: { type: String, trim: true, maxlength: 1000 },
+  employeeId: {
+    type: String, trim: true, uppercase: true, maxlength: 32,
+    required: function () { return this.role === "delivery_staff"; },
+  },
   shopName: { type: String, trim: true, maxlength: 120 },
-  role: { type: String, enum: ["super_admin", "admin", "vendor", "customer"], default: "customer", index: true },
-  permissions: [{ type: String, enum: ["manage_categories", "manage_banners", "manage_products", "manage_featured", "view_bookings", "manage_bookings", "manage_vendors", "view_messages"] }],
-  status: { type: String, enum: ["active", "inactive"], default: "active", index: true },
+  role: { type: String, enum: ["super_admin", "admin", "vendor", "delivery_staff", "customer", "reseller", "wholesaler"], default: "customer", index: true },
+  permissions: [{ type: String, enum: [...ADMIN_PERMISSIONS] }],
+  status: { type: String, enum: ["active", "inactive", "suspended", "pending", "rejected"], default: "active", index: true },
+  vendorProductPermissions: { type: vendorProductPermissionsSchema, default: undefined },
+  passwordResetTokenHash: { type: String, select: false, sparse: true, index: true },
+  passwordResetExpiresAt: { type: Date, select: false },
+  passwordResetOtpHash: { type: String, select: false },
+  passwordResetOtpExpiresAt: { type: Date, select: false },
+  passwordResetOtpAttempts: { type: Number, default: 0, select: false },
   cart: { type: [{
     productId: { type: Schema.Types.ObjectId, ref: "Product", required: true },
     variantId: { type: Schema.Types.ObjectId },
     quantity: { type: Number, min: 0.01, max: 100000, required: true },
   }], default: [] },
+  savedAddresses: { type: [{
+    label: { type: String, trim: true, maxlength: 60 },
+    name: { type: String, required: true, trim: true, maxlength: 120 },
+    phone: { type: String, required: true, trim: true, maxlength: 30 },
+    divisionId: { type: String, required: true, maxlength: 12 },
+    division: { type: String, required: true, trim: true, maxlength: 120 },
+    divisionBn: { type: String, required: true, trim: true, maxlength: 120 },
+    districtId: { type: String, required: true, maxlength: 12 },
+    district: { type: String, required: true, trim: true, maxlength: 120 },
+    districtBn: { type: String, required: true, trim: true, maxlength: 120 },
+    upazilaId: { type: String, maxlength: 12 },
+    upazila: { type: String, required: true, trim: true, maxlength: 120 },
+    upazilaBn: { type: String, trim: true, maxlength: 120 },
+    unionId: { type: String, maxlength: 12 },
+    union: { type: String, trim: true, maxlength: 120 },
+    unionBn: { type: String, trim: true, maxlength: 120 },
+    area: { type: String, trim: true, maxlength: 120 },
+    address: { type: String, required: true, trim: true, maxlength: 500 },
+    isDefault: { type: Boolean, default: false },
+  }], default: [] },
 }, { timestamps: true });
+
+const auditLogSchema = new Schema({
+  entityType: { type: String, enum: ["category", "colour", "attribute", "product", "variant"], required: true, index: true },
+  entityId: { type: String, required: true, trim: true, maxlength: 64, index: true },
+  action: { type: String, required: true, trim: true, maxlength: 80 },
+  actorId: { type: String, required: true, trim: true, maxlength: 64 },
+  actorName: { type: String, trim: true, maxlength: 120, default: "" },
+  actorRole: { type: String, trim: true, maxlength: 32, default: "" },
+  snapshot: { type: Schema.Types.Mixed, default: {} },
+  details: { type: String, trim: true, maxlength: 2000, default: "" },
+}, { timestamps: true });
+auditLogSchema.pre(["deleteOne", "deleteMany", "findOneAndDelete"], function () {
+  throw new Error("Audit log deletion is disabled");
+});
 
 const categorySchema = new Schema({
   name: { type: localized, required: true },
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
   image: { type: String, default: "" },
+  parentCategory: { type: Schema.Types.ObjectId, ref: "Category" },
+  variantTemplate: {
+    type: String,
+    enum: [...VARIANT_TEMPLATE_KEYS, ""],
+    default: "",
+  },
+  isFeatured: { type: Boolean, default: false, index: true },
   active: { type: Boolean, default: true, index: true },
+  order: { type: Number, default: 0 },
+  archived: { type: Boolean, default: false, index: true },
+  archivedAt: { type: Date },
+  archivedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  archiveReason: { type: String, trim: true, maxlength: 500 },
+  attributeDefinitions: {
+    type: [{
+      key: { type: String, required: true, trim: true, lowercase: true, maxlength: 80 },
+      name: { type: localized, required: true },
+      type: { type: String, enum: ["text", "number", "select", "multiselect", "boolean", "colour"], required: true },
+      options: [{
+        value: { type: String, required: true, trim: true, maxlength: 200 },
+        name: { type: localized, required: true },
+        hex: { type: String, trim: true, maxlength: 20 },
+      }],
+      required: { type: Boolean, default: false },
+      displayOrder: { type: Number, default: 0, min: -9999, max: 9999 },
+      active: { type: Boolean, default: true },
+    }],
+    default: [],
+  },
+}, { timestamps: true });
+
+const colourSchema = new Schema({
+  name: { type: localized, required: true },
+  hex: { type: String, required: true, trim: true, uppercase: true, maxlength: 7 },
+  rgb: { r: { type: Number, min: 0, max: 255 }, g: { type: Number, min: 0, max: 255 }, b: { type: Number, min: 0, max: 255 } },
+  active: { type: Boolean, default: true, index: true },
+  archived: { type: Boolean, default: false, index: true },
+  archivedAt: { type: Date },
+  archivedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  order: { type: Number, default: 0 },
 }, { timestamps: true });
 
 const bannerSchema = new Schema({
   image: { type: String, required: true },
   title: { type: localized, required: true },
   subtitle: { type: localized, required: true },
-  link: { type: String, default: "/" },
+  buttonText: {
+    en: { type: String, trim: true, maxlength: 120 },
+    bn: { type: String, trim: true, maxlength: 120 },
+  },
+  bgColor: { type: String, trim: true, maxlength: 120 },
+  link: { type: String, default: "" },
   order: { type: Number, default: 0 },
   active: { type: Boolean, default: true, index: true },
+  startDate: { type: Date },
+  endDate: { type: Date },
 }, { timestamps: true });
 
 const productVariantSchema = new Schema({
   label: { type: String, required: true, trim: true, maxlength: 60 },
+  colorHex: { type: String, trim: true, uppercase: true, match: /^#[0-9A-F]{6}$/ },
   price: { type: Number, required: true, min: 0 },
   stock: { type: Number, required: true, min: 0 },
+  originalPrice: { type: Number, min: 0 },
+  sku: { type: String, trim: true, uppercase: true, maxlength: 80 },
+  availability: { type: String, enum: ["in_stock", "out_of_stock", "preorder"], default: "in_stock" },
+  images: [{ type: String }],
+  attributeValues: { type: Schema.Types.Mixed, default: {} },
 });
+
+const productColourSchema = new Schema({
+  colourId: { type: Schema.Types.ObjectId, ref: "Colour" },
+  name: { type: localized, required: true },
+  hex: { type: String, required: true, trim: true, uppercase: true, maxlength: 7 },
+  images: [{ type: String }],
+}, { _id: true });
 
 const productSchema = new Schema({
   title: { type: localized, required: true },
   description: { type: localized, required: true },
+  productDetails: { type: String, trim: true, maxlength: 3000 },
   slug: { type: String, required: true, unique: true, lowercase: true, trim: true },
   price: { type: Number, required: true, min: 0 },
   discountPrice: { type: Number, min: 0 },
+  resellerPrice: { type: Number, min: 0 },
+  wholesalerPrice: { type: Number, min: 0 },
+  resellerMoq: { type: Number, min: 0.01, default: 1 },
+  wholesalerMoq: { type: Number, min: 0.01, default: 1 },
   stock: { type: Number, required: true, min: 0, default: 0 },
   unit: { type: String, enum: productUnits, default: "piece" },
   variants: { type: [productVariantSchema], default: [] },
+  attributeValues: { type: Schema.Types.Mixed, default: {} },
+  colours: { type: [productColourSchema], default: [] },
   category: { type: Schema.Types.ObjectId, ref: "Category", required: true, index: true },
   images: [{ type: String }],
   vendor: { type: Schema.Types.ObjectId, ref: "User", index: true },
+  createdBy: { type: Schema.Types.ObjectId, ref: "User", index: true },
+  createdByName: { type: String, trim: true, maxlength: 120 },
+  createdByRole: { type: String, trim: true, maxlength: 32 },
   active: { type: Boolean, default: false, index: true },
   approved: { type: Boolean, default: true, index: true },
   featured: { type: Boolean, default: false, index: true },
   bestSeller: { type: Boolean, default: false },
+  deletedAt: { type: Date, index: true },
+  deletedBy: { type: Schema.Types.ObjectId, ref: "User" },
+  deletedByName: { type: String, trim: true, maxlength: 120 },
+  deletedByRole: { type: String, trim: true, maxlength: 32 },
+  deletedActive: { type: Boolean },
 }, { timestamps: true });
 productSchema.index({ "title.en": "text", "title.bn": "text", "description.en": "text", "description.bn": "text" });
+
+const productRecoveryArchiveSchema = new Schema({
+  productId: { type: Schema.Types.ObjectId, required: true, index: true },
+  snapshot: { type: Schema.Types.Mixed, required: true },
+  snapshotHash: { type: String, required: true, maxlength: 64 },
+  archivedAt: { type: Date, required: true },
+  archivedBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
+  archivedByName: { type: String, required: true, trim: true, maxlength: 120 },
+  relationships: {
+    orderSnapshots: { type: Number, required: true, min: 0 },
+    cartEntries: { type: Number, required: true, min: 0 },
+    comments: { type: Number, required: true, min: 0 },
+    stockMovements: { type: Number, required: true, min: 0 },
+  },
+}, { timestamps: true });
+productRecoveryArchiveSchema.index({ productId: 1, archivedAt: -1 });
+
+const productCommentSchema = new Schema({
+  product: { type: Schema.Types.ObjectId, ref: "Product", required: true, index: true },
+  customer: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  customerName: { type: String, required: true, trim: true, maxlength: 120 },
+  message: { type: String, required: true, trim: true, maxlength: 2000 },
+  rating: { type: Number, min: 1, max: 5 },
+  images: { type: [String], default: [] },
+  createdAt: { type: Date, required: true, default: Date.now },
+  adminReply: { type: String, trim: true, maxlength: 2000, default: "" },
+  repliedBy: { type: String, maxlength: 64 },
+  repliedAt: Date,
+}, { timestamps: false });
+productCommentSchema.index({ product: 1, createdAt: -1 });
 
 const orderSchema = new Schema<OrderRecord>({
   customer: { type: Schema.Types.ObjectId, ref: "User", index: true },
@@ -88,6 +425,19 @@ const orderSchema = new Schema<OrderRecord>({
     name: { type: String, required: true, trim: true, maxlength: 120 },
     phone: { type: String, required: true, trim: true, maxlength: 30 },
     address: { type: String, required: true, trim: true, maxlength: 1000 },
+    division: { type: String, trim: true, maxlength: 120 },
+    divisionId: { type: String, trim: true, maxlength: 12 },
+    divisionBn: { type: String, trim: true, maxlength: 120 },
+    district: { type: String, trim: true, maxlength: 120 },
+    districtId: { type: String, trim: true, maxlength: 12 },
+    districtBn: { type: String, trim: true, maxlength: 120 },
+    upazila: { type: String, trim: true, maxlength: 120 },
+    upazilaId: { type: String, trim: true, maxlength: 12 },
+    upazilaBn: { type: String, trim: true, maxlength: 120 },
+    union: { type: String, trim: true, maxlength: 120 },
+    unionId: { type: String, trim: true, maxlength: 12 },
+    unionBn: { type: String, trim: true, maxlength: 120 },
+    area: { type: String, trim: true, maxlength: 120 },
     notes: { type: String, trim: true, maxlength: 2000, default: "" },
     email: { type: String, lowercase: true, trim: true, maxlength: 254 },
   },
@@ -96,25 +446,63 @@ const orderSchema = new Schema<OrderRecord>({
     variantId: { type: Schema.Types.ObjectId },
     vendorId: { type: Schema.Types.ObjectId, ref: "User" },
     variantLabel: { type: String, trim: true, maxlength: 60 },
+    variantSku: { type: String, trim: true, uppercase: true, maxlength: 80 },
+    variantAttributeValues: { type: Schema.Types.Mixed, default: {} },
+    variantImages: [{ type: String }],
     unit: { type: String, enum: productUnits, default: "piece" },
     title: { type: String, required: true },
     image: { type: String, default: "" },
     quantity: { type: Number, required: true, min: 0.01, max: 100_000 },
     unitPrice: { type: Number, required: true, min: 0 },
-    status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "cancelled"], default: "pending" },
+    status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "failed", "cancelled"], default: "pending" },
   }],
+  subtotal: { type: Number, min: 0 },
+  deliveryCharge: { type: Number, min: 0, default: 0 },
+  coinDiscount: { type: Number, min: 0, default: 0 },
+  coinsRedeemed: { type: Number, min: 0, default: 0 },
+  voucherDiscount: { type: Number, min: 0, default: 0 },
+  voucherCode: { type: String, trim: true, maxlength: 40 },
   total: { type: Number, required: true, min: 0 },
-  paymentMethod: { type: String, enum: ["COD"], default: "COD" },
-  status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "cancelled"], default: "pending", index: true },
-}, { timestamps: true });
+  paymentMethod: { type: String, enum: ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"], default: "COD" },
+  payment: {
+    method: { type: String, enum: ["bkash", "nagad", "rocket", "bank"], default: "bkash" },
+    transactionId: { type: String, trim: true, uppercase: true, maxlength: 40, default: "" },
+    senderNumber: { type: String, trim: true, maxlength: 30, default: "" },
+    senderAccountInfo: { type: String, trim: true, maxlength: 200, default: "" },
+    amount: { type: Number, min: 0, default: 0 },
+    status: { type: String, enum: ["pending", "verified", "rejected"], default: "pending", index: true },
+    verifiedBy: { type: Schema.Types.ObjectId, ref: "User" },
+    verifiedAt: { type: Date },
+    rejectReason: { type: String, trim: true, maxlength: 300, default: "" },
+  },
+  status: { type: String, enum: ["pending", "confirmed", "shipped", "delivered", "failed", "cancelled", "partially_delivered"], default: "pending", index: true },
+  deliveryAudit: { type: [deliveryAuditSchema], default: [] },
+  delivery: { type: deliverySchema, default: () => ({}) },
+}, { timestamps: true, optimisticConcurrency: true });
+
+orderSchema.pre(["findOneAndUpdate", "updateOne", "updateMany"], function () {
+  const update = this.getUpdate();
+  if (!update || Array.isArray(update)) return;
+  const fields = Object.keys(update).flatMap((key) => key.startsWith("$") && typeof update[key] === "object" && update[key] !== null
+    ? Object.keys(update[key] as Record<string, unknown>)
+    : [key]);
+  if (fields.some((field) => field === "deliveryAudit" || field.startsWith("deliveryAudit."))) {
+    throw new Error("Delivery audit history is append-only");
+  }
+});
+orderSchema.pre(["deleteOne", "deleteMany", "findOneAndDelete"], function () {
+  throw new Error("Order deletion is disabled to preserve delivery and audit history");
+});
 
 const applicationSchema = new Schema({
+  applicationType: { type: String, enum: ["vendor", "reseller", "wholesaler"], default: "vendor", index: true },
   name: { type: String, required: true, trim: true, maxlength: 120 },
   shopName: { type: String, required: true, trim: true, maxlength: 120 },
   email: { type: String, required: true, lowercase: true, trim: true },
   phone: { type: String, required: true, trim: true, maxlength: 30 },
   address: { type: String, required: true, trim: true, maxlength: 1000 },
   description: { type: String, required: true, trim: true, maxlength: 3000 },
+  tradeLicense: { type: String, trim: true, maxlength: 200, default: "" },
   documents: [{ type: String }],
   status: { type: String, enum: ["pending", "approved", "rejected"], default: "pending", index: true },
 }, { timestamps: true });
@@ -122,15 +510,259 @@ const applicationSchema = new Schema({
 const contactSchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 120 },
   email: { type: String, required: true, lowercase: true, trim: true },
+  phone: { type: String, trim: true, maxlength: 30, default: "" },
+  address: { type: String, trim: true, maxlength: 1000, default: "" },
+  inquiryType: { type: String, trim: true, maxlength: 40, default: "" },
   subject: { type: String, required: true, trim: true, maxlength: 160 },
   message: { type: String, required: true, trim: true, maxlength: 4000 },
   read: { type: Boolean, default: false },
 }, { timestamps: true });
 
+const newsletterSubscriberSchema = new Schema({
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true, maxlength: 254 },
+  source: { type: String, trim: true, maxlength: 40, default: "footer" },
+  active: { type: Boolean, default: true },
+}, { timestamps: true });
+
 export const User: Model<UserRecord> = (models.User as Model<UserRecord> | undefined) || model<UserRecord>("User", userSchema);
 export const Category = models.Category || model("Category", categorySchema);
+export const Colour = models.Colour || model("Colour", colourSchema);
+export const AuditLog = models.AuditLog || model("AuditLog", auditLogSchema);
 export const Banner = models.Banner || model("Banner", bannerSchema);
+
+const offerSchema = new Schema({
+  title: { type: localized, required: true },
+  subtitle: { type: localized, required: true },
+  image: { type: String, required: true },
+  link: { type: String, default: "/products" },
+  active: { type: Boolean, default: true, index: true },
+  order: { type: Number, default: 0 },
+  startDate: { type: Date },
+  endDate: { type: Date },
+}, { timestamps: true });
+
+export const Offer = models.Offer || model("Offer", offerSchema);
+
+const announcementSchema = new Schema({
+  title: { type: localized, required: true },
+  link: { type: String, default: "/products" },
+  active: { type: Boolean, default: true, index: true },
+  order: { type: Number, default: 0 },
+  startDate: { type: Date },
+  endDate: { type: Date },
+}, { timestamps: true });
+
+export const Announcement = models.Announcement || model("Announcement", announcementSchema);
 export const Product = models.Product || model("Product", productSchema);
+export const ProductRecoveryArchive = models.ProductRecoveryArchive || model("ProductRecoveryArchive", productRecoveryArchiveSchema);
+export const ProductComment = models.ProductComment || model("ProductComment", productCommentSchema);
 export const Order: Model<OrderRecord> = (models.Order as Model<OrderRecord> | undefined) || model<OrderRecord>("Order", orderSchema);
+const deliverySettingsSchema = new Schema({
+  auditFrequencyPercent: { type: Number, required: true, min: 0, max: 100, default: 0 },
+  defaultDeliveryCharge: { type: Number, min: 0, max: 100000, default: 60 },
+  deliveryChargeEnabled: { type: Boolean, default: true },
+  insideDhakaCharge: { type: Number, min: 0, max: 100000, default: 60 },
+  outsideDhakaCharge: { type: Number, min: 0, max: 100000, default: 120 },
+  freeDeliveryEnabled: { type: Boolean, default: false },
+  freeDeliveryThreshold: { type: Number, min: 0, max: 10000000, default: 5000 },
+  updatedBy: { type: String, required: true, maxlength: 64 },
+}, { timestamps: true });
+export const DeliverySettings = models.DeliverySettings || model("DeliverySettings", deliverySettingsSchema);
+
+const paymentMethodSettingSchema = new Schema({
+  method: { type: String, enum: ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"], required: true, unique: true },
+  label: { type: String, trim: true, maxlength: 120, default: "" },
+  enabled: { type: Boolean, default: false },
+  accountNumber: { type: String, trim: true, maxlength: 120, default: "" },
+  accountName: { type: String, trim: true, maxlength: 120, default: "" },
+  instructions: { type: String, trim: true, maxlength: 1000, default: "" },
+  updatedBy: { type: String, trim: true, maxlength: 64, default: "" },
+}, { timestamps: true });
+export const PaymentMethodSetting = models.PaymentMethodSetting || model("PaymentMethodSetting", paymentMethodSettingSchema);
 export const VendorApplication = models.VendorApplication || model("VendorApplication", applicationSchema);
 export const ContactMessage = models.ContactMessage || model("ContactMessage", contactSchema);
+export const NewsletterSubscriber = models.NewsletterSubscriber || model("NewsletterSubscriber", newsletterSubscriberSchema);
+
+type CoinRewardSettingsRecord = {
+  coinEarning: { retailPer1000: number; resellerPer1000: number; wholesalerPer1000: number };
+  coinRedemption: { coins: number; bdt: number; minRedeemCoins: number };
+  voucher: { purchaseThreshold: number; voucherAmount: number; expiryDays: number; minOrderAmount: number };
+  toggles: { rewardSystemEnabled: boolean; coinUsageEnabled: boolean; voucherSystemEnabled: boolean };
+  updatedBy: string;
+};
+
+const coinRewardSettingsSchema = new Schema<CoinRewardSettingsRecord>({
+  coinEarning: {
+    retailPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+    resellerPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+    wholesalerPer1000: { type: Number, required: true, min: 0, max: 100000, default: 3 },
+  },
+  coinRedemption: {
+    coins: { type: Number, required: true, min: 1, max: 1000000, default: 100 },
+    bdt: { type: Number, required: true, min: 0, max: 1000000, default: 5 },
+    minRedeemCoins: { type: Number, required: true, min: 0, max: 10000000, default: 500 },
+  },
+  voucher: {
+    purchaseThreshold: { type: Number, required: true, min: 0, max: 100000000, default: 50000 },
+    voucherAmount: { type: Number, required: true, min: 0, max: 10000000, default: 500 },
+    expiryDays: { type: Number, required: true, min: 0, max: 3650, default: 30 },
+    minOrderAmount: { type: Number, required: true, min: 0, max: 100000000, default: 0 },
+  },
+  toggles: {
+    rewardSystemEnabled: { type: Boolean, required: true, default: false },
+    coinUsageEnabled: { type: Boolean, required: true, default: false },
+    voucherSystemEnabled: { type: Boolean, required: true, default: false },
+  },
+  updatedBy: { type: String, required: true, maxlength: 64 },
+}, { timestamps: true });
+
+export const CoinRewardSettings: Model<CoinRewardSettingsRecord> = (models.CoinRewardSettings as Model<CoinRewardSettingsRecord> | undefined) || model<CoinRewardSettingsRecord>("CoinRewardSettings", coinRewardSettingsSchema);
+
+
+type UserWalletRecord = {
+  userId: mongoose.Types.ObjectId;
+  balanceCoins: number;
+  totalEarnedCoins: number;
+  totalRedeemedCoins: number;
+};
+
+const userWalletSchema = new Schema<UserWalletRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, unique: true, index: true },
+  balanceCoins: { type: Number, required: true, min: 0, default: 0 },
+  totalEarnedCoins: { type: Number, required: true, min: 0, default: 0 },
+  totalRedeemedCoins: { type: Number, required: true, min: 0, default: 0 },
+}, { timestamps: true });
+
+export const UserWallet: Model<UserWalletRecord> = (models.UserWallet as Model<UserWalletRecord> | undefined) || model<UserWalletRecord>("UserWallet", userWalletSchema);
+
+type CoinTransactionRecord = {
+  userId: mongoose.Types.ObjectId;
+  orderId?: mongoose.Types.ObjectId;
+  amount: number;
+  type: "earn" | "redeem" | "expire" | "admin_adjust";
+  description: string;
+  createdAt?: Date;
+};
+
+const coinTransactionSchema = new Schema<CoinTransactionRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", index: true },
+  amount: { type: Number, required: true },
+  type: { type: String, enum: ["earn", "redeem", "expire", "admin_adjust"], required: true, index: true },
+  description: { type: String, required: true, trim: true, maxlength: 500 },
+}, { timestamps: true });
+coinTransactionSchema.index({ userId: 1, orderId: 1, type: 1 });
+
+export const CoinTransaction: Model<CoinTransactionRecord> = (models.CoinTransaction as Model<CoinTransactionRecord> | undefined) || model<CoinTransactionRecord>("CoinTransaction", coinTransactionSchema);
+
+
+type RewardVoucherRecord = {
+  userId: mongoose.Types.ObjectId;
+  voucherCode: string;
+  amount: number;
+  minOrderAmount: number;
+  expiresAt: Date;
+  status: "active" | "used" | "expired";
+  createdAt?: Date;
+  usedAt?: Date;
+  orderId?: mongoose.Types.ObjectId;
+  milestone?: number;
+};
+
+const rewardVoucherSchema = new Schema<RewardVoucherRecord>({
+  userId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  voucherCode: { type: String, required: true, unique: true, trim: true, uppercase: true, maxlength: 40 },
+  amount: { type: Number, required: true, min: 0 },
+  minOrderAmount: { type: Number, required: true, min: 0, default: 0 },
+  expiresAt: { type: Date, required: true, index: true },
+  status: { type: String, enum: ["active", "used", "expired"], required: true, default: "active", index: true },
+  usedAt: { type: Date },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order" },
+  milestone: { type: Number, min: 0 },
+}, { timestamps: true });
+rewardVoucherSchema.index({ userId: 1, status: 1, createdAt: -1 });
+
+export const RewardVoucher: Model<RewardVoucherRecord> = (models.RewardVoucher as Model<RewardVoucherRecord> | undefined) || model<RewardVoucherRecord>("RewardVoucher", rewardVoucherSchema);
+
+
+type StockMovementRecord = {
+  productId: mongoose.Types.ObjectId;
+  variantId?: mongoose.Types.ObjectId;
+  productTitle: string;
+  variantLabel: string;
+  delta: number;
+  stockBefore: number | null;
+  stockAfter: number | null;
+  reason: "product_created" | "product_updated" | "order_placed" | "order_cancelled" | "order_rollback" | "return_restocked";
+  orderId?: mongoose.Types.ObjectId;
+  actorId?: mongoose.Types.ObjectId;
+  actorRole?: string;
+  note: string;
+  createdAt?: Date;
+};
+
+const stockMovementSchema = new Schema<StockMovementRecord>({
+  productId: { type: Schema.Types.ObjectId, ref: "Product", required: true, index: true },
+  variantId: { type: Schema.Types.ObjectId },
+  productTitle: { type: String, required: true, trim: true, maxlength: 300, default: "" },
+  variantLabel: { type: String, trim: true, maxlength: 60, default: "" },
+  delta: { type: Number, required: true },
+  stockBefore: { type: Number, default: null },
+  stockAfter: { type: Number, default: null },
+  reason: { type: String, enum: ["product_created", "product_updated", "order_placed", "order_cancelled", "order_rollback", "return_restocked"], required: true, index: true },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", index: true },
+  actorId: { type: Schema.Types.ObjectId, ref: "User" },
+  actorRole: { type: String, trim: true, maxlength: 32, default: "" },
+  note: { type: String, trim: true, maxlength: 500, default: "" },
+}, { timestamps: true });
+stockMovementSchema.index({ productId: 1, createdAt: -1 });
+stockMovementSchema.index({ createdAt: -1 });
+stockMovementSchema.index({ orderId: 1, createdAt: -1 });
+
+export const StockMovement: Model<StockMovementRecord> = (models.StockMovement as Model<StockMovementRecord> | undefined) || model<StockMovementRecord>("StockMovement", stockMovementSchema);
+
+// --- Wholesale & Reseller Order Request System (additive) ---
+export type TradeRequestStatus = "new_request" | "discussion" | "price_negotiation" | "approved" | "rejected" | "order_confirmed" | "completed";
+export type TradeRequestRole = "reseller" | "wholesaler";
+
+const tradeRequestItemSchema = new Schema({
+  productId: { type: String, trim: true, maxlength: 64 },
+  title: { type: String, required: true, trim: true, maxlength: 300 },
+  quantity: { type: Number, required: true, min: 0.01, max: 1_000_000 },
+  unit: { type: String, trim: true, maxlength: 30, default: "" },
+  variantLabel: { type: String, trim: true, maxlength: 120, default: "" },
+  requestedVariant: { type: String, trim: true, maxlength: 300, default: "" },
+  image: { type: String, trim: true, maxlength: 2000, default: "" },
+}, { _id: false });
+
+const tradeRequestMessageSchema = new Schema({
+  senderId: { type: String, required: true, trim: true, maxlength: 64 },
+  senderRole: { type: String, enum: ["reseller", "wholesaler", "admin", "super_admin"], required: true },
+  senderName: { type: String, required: true, trim: true, maxlength: 120 },
+  body: { type: String, required: true, trim: true, maxlength: 4000 },
+  readByAdmin: { type: Boolean, default: false },
+  readByRequester: { type: Boolean, default: false },
+  createdAt: { type: Date, required: true, default: Date.now },
+}, { _id: true });
+
+const tradeOrderRequestSchema = new Schema({
+  requester: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+  requesterRole: { type: String, enum: ["reseller", "wholesaler"], required: true, index: true },
+  requesterName: { type: String, required: true, trim: true, maxlength: 120 },
+  requesterEmail: { type: String, required: true, trim: true, lowercase: true, maxlength: 254 },
+  contactNumber: { type: String, required: true, trim: true, maxlength: 40 },
+  deliveryLocation: { type: String, required: true, trim: true, maxlength: 1000 },
+  customerMessage: { type: String, trim: true, maxlength: 4000, default: "" },
+  items: { type: [tradeRequestItemSchema], default: [] },
+  status: { type: String, enum: ["new_request", "discussion", "price_negotiation", "approved", "rejected", "order_confirmed", "completed"], default: "new_request", index: true },
+  messages: { type: [tradeRequestMessageSchema], default: [] },
+  proposedItems: { type: [{ title: { type: String, trim: true, maxlength: 300, default: "" }, quantity: { type: Number, min: 0 }, unitPrice: { type: Number, min: 0 }, note: { type: String, trim: true, maxlength: 300, default: "" } }], default: [] },
+  proposedDeliveryCharge: { type: Number, min: 0 },
+  proposedTotal: { type: Number, min: 0 },
+  negotiationNote: { type: String, trim: true, maxlength: 2000, default: "" },
+  adminUnread: { type: Boolean, default: true, index: true },
+  requesterUnread: { type: Boolean, default: false, index: true },
+}, { timestamps: true });
+tradeOrderRequestSchema.index({ createdAt: -1 });
+
+export const TradeOrderRequest = models.TradeOrderRequest || model("TradeOrderRequest", tradeOrderRequestSchema);

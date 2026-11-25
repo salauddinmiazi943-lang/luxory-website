@@ -1,4 +1,4 @@
-export async function uploadToCloudinary(file: File, purpose?: "vendor-document") {
+export async function uploadToCloudinary(file: File, purpose?: "vendor-document" | "product-review") {
   const signatureRequest = await fetch("/api/upload/signature", {
     method: "POST",
     body: (() => { const data = new FormData(); if (purpose) data.set("purpose", purpose); return data; })(),

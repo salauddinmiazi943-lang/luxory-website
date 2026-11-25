@@ -10,56 +10,64 @@ export type CategoryProductPreset = {
   options: string[];
 };
 
-const weightOptions = [
-  "250 Gram",
-  "500 Gram",
-  "1 Kilogram",
-  "1.5 Kilograms",
-  "2 Kilograms",
-  "5 Kilograms",
-];
-
-const clothingOptions = [
-  "XS (Extra Small)",
-  "S (Small)",
-  "M (Medium)",
-  "L (Large)",
-  "XL (Extra Large)",
-  "XXL (Double Extra Large)",
-  "XXXL (Triple Extra Large)",
-];
-
-const liquidOptions = [
-  "100 ml",
-  "250 ml",
-  "500 ml",
-  "1 Liter",
-  "2 Liters",
-];
+const clothingOptions = ["XS", "S", "M", "L", "XL", "XXL", "XXXL"];
+const shoeOptions = ["38", "39", "40", "41", "42", "43", "44"];
 
 export function categoryProductPreset(category?: CategoryLike): CategoryProductPreset | undefined {
   const categoryText = `${category?.slug ?? ""} ${category?.name?.en ?? ""} ${category?.name?.bn ?? ""}`
     .toLowerCase()
     .replace(/[_-]+/g, " ");
 
-  if (/(perfume|attar|পারফিউম|আতর)/.test(categoryText)) {
-    return { unit: "piece", options: ["20 ml", "30 ml", "50 ml", "100 ml", "200 ml"] };
+  if (/(perfume|attar|fragrance|পারফিউম|আতর)/.test(categoryText)) {
+    return { unit: "ml", options: [] };
   }
 
-  if (/(shoe|footwear|জুতা|পাদুকা)/.test(categoryText)) {
-    return { unit: "pair", options: ["38", "39", "40", "41", "42", "43", "44"] };
+  if (/(shoe|footwear|sneaker|sandal|জুতা|পাদুকা)/.test(categoryText)) {
+    return { unit: "pair", options: shoeOptions };
   }
 
-  if (/(clothing|clothes|apparel|garment|fashion|shirt|t shirt|trouser|pants|পোশাক|জামা|শার্ট)/.test(categoryText)) {
+  if (/(cloth|clothing|apparel|garment|fashion|shirt|t shirt|pant|trouser|dress|saree|sari|sharee|kurti|panjabi|পোশাক|জামা|শার্ট|শাড়ি|কাপড়)/.test(categoryText)) {
     return { unit: "piece", options: clothingOptions };
   }
 
-  if (/(liquid|beverage|drink|juice|milk|shampoo|detergent|dishwash|cleaning|cosmetic|oil|\btel\b|তরল|পানীয়|জুস|দুধ|শ্যাম্পু|তেল|প্রসাধনী)/.test(categoryText)) {
-    return { unit: "piece", options: liquidOptions };
+  if (/(oil|tel|cooking oil|তেল)/.test(categoryText)) {
+    return { unit: "liter", options: [] };
   }
 
-  if (/(grocery|groceries|food|fruit|vegetable|produce|fish|meat|rice|grain|flour|sugar|potato|onion|মুদি|খাবার|ফল|সবজি|মাছ|মাংস|চাল|আটা|চিনি|আলু|পেঁয়াজ)/.test(categoryText)) {
-    return { unit: "piece", options: weightOptions };
+  if (/(liquid|beverage|drink|juice|milk|water|shampoo|detergent|dishwash|cleaning|lotion|তরল|পানীয়|জুস|দুধ|শ্যাম্পু|লোশন)/.test(categoryText)) {
+    return { unit: "ml", options: [] };
+  }
+
+  if (/(cosmetic|beauty|makeup|skincare|cream|lipstick|প্রসাধনী|বিউটি|কসমেটিক)/.test(categoryText)) {
+    return { unit: "piece", options: [] };
+  }
+
+  if (/(grocery|grocer|food|rice|flour|sugar|dal|lentil|spice|masala|salt|tea|মুদি|খাবার|চাল|আটা|চিনি|ডাল|মসলা|লবণ|চা)/.test(categoryText)) {
+    return { unit: "kg", options: [] };
+  }
+
+  if (/(fruit|vegetable|produce|fish|meat|potato|onion|ফল|সবজি|মাছ|মাংস|আলু|পেঁয়াজ)/.test(categoryText)) {
+    return { unit: "kg", options: [] };
+  }
+
+  if (/(gram|গ্রাম)/.test(categoryText)) {
+    return { unit: "gram", options: [] };
+  }
+
+  if (/(fabric|cloth roll|meter|yardage|কাপড় রোল|মিটার)/.test(categoryText)) {
+    return { unit: "meter", options: [] };
+  }
+
+  if (/(packet|snack|biscuit|noodle|প্যাকেট|বিস্কুট)/.test(categoryText)) {
+    return { unit: "packet", options: [] };
+  }
+
+  if (/(box|gift box|বক্স)/.test(categoryText)) {
+    return { unit: "box", options: [] };
+  }
+
+  if (/(dozen|egg|ডজন|ডিম)/.test(categoryText)) {
+    return { unit: "dozen", options: [] };
   }
 
   return undefined;
