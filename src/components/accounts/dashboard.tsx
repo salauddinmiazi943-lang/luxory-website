@@ -8,6 +8,7 @@ type Method = "cash" | "bkash" | "nagad" | "rocket" | "bank" | "other";
 type Party = { _id: string; name: string; type: "customer" | "supplier"; phone?: string; address?: string; openingBalancePaisa?: number; balancePaisa: number };
 type Category = { _id: string; name: string; type: "income" | "expense" };
 type Entry = { _id: string; type: Kind; date: string; amountPaisa: number; paidPaisa: number; method: Method; partyId?: string; partyName?: string; categoryId?: string; categoryName?: string; note?: string; audit?: unknown[] };
+type LedgerEntry = Entry & { deltaPaisa: number; balancePaisa: number };
 type Report = { byDay: { _id: string; sales: number; income: number; costs: number }[]; byCategory: { _id: { name: string }; amountPaisa: number }[]; summary: { _id: Kind; amountPaisa: number; paidPaisa: number }[]; note: string };
 type ApiResult<T> = { items?: T[]; error?: string; totals?: { _id: Kind; amount: number; paid: number }[] };
 
@@ -105,7 +106,7 @@ export function AccountsDashboard({ isAdmin }: { isAdmin: boolean }) {
   const [openings, setOpenings] = useState<{ method: Method; amountPaisa: number }[]>([]);
   const [report, setReport] = useState<Report | null>(null);
   const [reportPeriod, setReportPeriod] = useState("week");
-  const [partyLedger, setPartyLedger] = useState<{ party: Party; items: (Entry & { balancePaisa: number })[]; balancePaisa: number } | null>(null);
+  const [partyLedger, setPartyLedger] = useState<{ party: Party; items: LedgerEntry[]; balancePaisa: number } | null>(null);
   const [managers, setManagers] = useState<{ id: string; name: string; email: string; active: boolean }[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -243,7 +244,7 @@ export function AccountsDashboard({ isAdmin }: { isAdmin: boolean }) {
   useEffect(() => { if (tab !== "reports") return; const timer = window.setTimeout(() => void openReport(), 0); return () => window.clearTimeout(timer); }, [tab, openReport]);
 
   async function openLedger(party: Party) {
-    try { const data = await api<{ party: Party; items: (Entry & { balancePaisa: number })[]; balancePaisa: number }>(`/api/accounts/parties/${party._id}`); setPartyLedger(data); }
+    try { const data = await api<{ party: Party; items: LedgerEntry[]; balancePaisa: number }>(`/api/accounts/parties/${party._id}`); setPartyLedger(data); }
     catch (reason) { setError(reason instanceof Error ? reason.message : "খাতা খোলা যায়নি"); }
   }
 

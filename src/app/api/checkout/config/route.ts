@@ -3,13 +3,22 @@ import { resolveDeliveryRuleConfig } from "@/lib/delivery-charge";
 import { connectDb } from "@/lib/db";
 import { PaymentMethodSetting } from "@/lib/models";
 
-const DEFAULT_PAYMENT_METHODS = [
+type PaymentMethodConfig = {
+  method: "COD" | "BKASH" | "NAGAD" | "ROCKET" | "BANK";
+  label: string;
+  enabled: boolean;
+  accountNumber: string;
+  accountName: string;
+  instructions: string;
+};
+
+const DEFAULT_PAYMENT_METHODS: PaymentMethodConfig[] = [
   { method: "COD", label: "Cash on Delivery", enabled: true, accountNumber: "", accountName: "", instructions: "Pay when your order is delivered." },
   { method: "BKASH", label: "bKash", enabled: false, accountNumber: process.env.NEXT_PUBLIC_BKASH_NUMBER?.trim() || "", accountName: process.env.NEXT_PUBLIC_BKASH_MERCHANT_LABEL?.trim() || "Send Money", instructions: "Send money and enter sender number and Transaction ID." },
   { method: "NAGAD", label: "Nagad", enabled: false, accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
   { method: "ROCKET", label: "Rocket", enabled: false, accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
   { method: "BANK", label: "Bank Transfer", enabled: false, accountNumber: "", accountName: "", instructions: "Transfer to the account and enter sender/account info and Transaction/Reference ID." },
-] as const;
+];
 
 export async function GET() {
   try {
