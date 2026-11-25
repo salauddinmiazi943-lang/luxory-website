@@ -6,27 +6,34 @@ import { categoryProductPreset } from "@/lib/category-product-options";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
 import { productUnits, quantityStep, unitLabel, type ProductUnit } from "@/lib/product-units";
 
-type ProductOption = { id?: string; label: string; price: string; stock: string };
+type ProductOption = { id?: string; label: string; colorHex?: string; price: string; stock: string; sku?: string; availability?: "in_stock" | "out_of_stock" | "preorder"; images?: string[]; attributeValues?: Record<string, string | number | boolean | string[]> };
 type ProductForEdit = {
   _id: string;
   title?: { en?: string; bn?: string };
   description?: { en?: string; bn?: string };
+  productDetails?: string;
   category?: string | { _id?: string };
   vendor?: string | { _id?: string };
   price?: number;
   discountPrice?: number;
-  resellerPrice?: number;
-  wholesalerPrice?: number;
-  resellerMoq?: number;
-  wholesalerMoq?: number;
   stock?: number;
   unit?: string;
-  variants?: { _id?: string; label: string; price: number; stock: number }[];
+  variants?: { _id?: string; label: string; colorHex?: string; price: number; stock: number; sku?: string; availability?: "in_stock" | "out_of_stock" | "preorder"; images?: string[]; attributeValues?: Record<string, string | number | boolean | string[]> }[];
   images?: string[];
+  attributeValues?: Record<string, string | number | boolean | string[]>;
   active?: boolean;
   featured?: boolean;
 };
-type CategoryOption = { _id: string; slug: string; name: { en: string; bn: string } };
+type CategoryAttributeDefinition = {
+  key: string;
+  name: { en: string; bn?: string };
+  type: "text" | "number" | "select" | "multiselect" | "boolean" | "colour";
+  options?: { value: string; name: { en: string; bn?: string }; hex?: string }[];
+  required?: boolean;
+  displayOrder?: number;
+  active?: boolean;
+};
+type CategoryOption = { _id: string; slug: string; name: { en: string; bn: string }; attributeDefinitions?: CategoryAttributeDefinition[] };
 type VendorOption = { id: string; name: string; email: string };
 
 function referenceId(reference: string | { _id?: string } | undefined) {
@@ -52,23 +59,26 @@ export function ProductEditor({
   const [titleBn, setTitleBn] = useState(product.title?.bn ?? "");
   const [descriptionEn, setDescriptionEn] = useState(product.description?.en ?? "");
   const [descriptionBn, setDescriptionBn] = useState(product.description?.bn ?? "");
+  const [productDetails, setProductDetails] = useState(product.productDetails ?? "");
   const [category, setCategory] = useState(referenceId(product.category));
+  const [attributeValues, setAttributeValues] = useState<Record<string, string | number | boolean | string[]>>(product.attributeValues ?? {});
   const [vendor, setVendor] = useState(referenceId(product.vendor));
   const [unit, setUnit] = useState<ProductUnit>(
     productUnits.includes(product.unit as ProductUnit) ? product.unit as ProductUnit : "piece",
   );
   const [price, setPrice] = useState(String(product.price ?? 0));
   const [discountPrice, setDiscountPrice] = useState(product.discountPrice == null ? "" : String(product.discountPrice));
-  const [resellerPrice, setResellerPrice] = useState(product.resellerPrice == null ? "" : String(product.resellerPrice));
-  const [wholesalerPrice, setWholesalerPrice] = useState(product.wholesalerPrice == null ? "" : String(product.wholesalerPrice));
-  const [resellerMoq, setResellerMoq] = useState(product.resellerMoq == null ? "1" : String(product.resellerMoq));
-  const [wholesalerMoq, setWholesalerMoq] = useState(product.wholesalerMoq == null ? "1" : String(product.wholesalerMoq));
   const [stock, setStock] = useState(String(product.stock ?? 0));
   const [variants, setVariants] = useState<ProductOption[]>(() => (product.variants ?? []).map((variant) => ({
     ...(variant._id ? { id: variant._id } : {}),
     label: variant.label,
+    colorHex: variant.colorHex,
     price: String(variant.price),
     stock: String(variant.stock),
+    sku: variant.sku,
+    availability: variant.availability,
+    images: variant.images ?? [],
+    attributeValues: variant.attributeValues ?? {},
   })));
   const [images, setImages] = useState(product.images ?? []);
   const [active, setActive] = useState(product.active !== false);
@@ -107,6 +117,7 @@ export function ProductEditor({
 
   function changeCategory(categoryId: string) {
     setCategory(categoryId);
+    setAttributeValues({});
     const preset = categoryProductPreset(categories.find((item) => item._id === categoryId));
     if (!preset) return;
     const msg = `Apply category preset? Unit: ${unitLabel(preset.unit)}${preset.options.length ? `, suggested options: ${preset.options.join(", ")}` : ""}. You can still change the unit/options.`;
@@ -129,23 +140,26 @@ export function ProductEditor({
     const body: Record<string, unknown> = {
       title: { en: titleEn.trim(), bn: titleBn.trim() },
       description: { en: descriptionEn.trim(), bn: descriptionBn.trim() },
+      productDetails: productDetails.trim(),
       category,
+      attributeValues,
       unit,
       images,
       active,
       featured,
     };
 
-    body.resellerPrice = resellerPrice.trim() ? Number(resellerPrice) : null;
-    body.wholesalerPrice = wholesalerPrice.trim() ? Number(wholesalerPrice) : null;
-    body.resellerMoq = resellerMoq.trim() ? Number(resellerMoq) : null;
-    body.wholesalerMoq = wholesalerMoq.trim() ? Number(wholesalerMoq) : null;
     if (variants.length) {
       body.variants = variants.map((variant) => ({
         ...(variant.id ? { id: variant.id } : {}),
         label: variant.label.trim(),
+        ...(variant.colorHex ? { colorHex: variant.colorHex.toUpperCase() } : {}),
         price: Number(variant.price),
         stock: Number(variant.stock),
+        sku: variant.sku?.trim() || undefined,
+        availability: Number(variant.stock) > 0 ? variant.availability ?? "in_stock" : "out_of_stock",
+        images: variant.images ?? [],
+        attributeValues: variant.attributeValues ?? {},
       }));
       body.discountPrice = null;
     } else {
@@ -181,25 +195,39 @@ export function ProductEditor({
         <div className="field"><label htmlFor="edit-product-title-bn">Product name (বাংলা)</label><input id="edit-product-title-bn" value={titleBn} onChange={(event) => setTitleBn(event.target.value)} maxLength={500} /></div>
         <div className="field wide"><label htmlFor="edit-product-description-en">Description (English)</label><textarea id="edit-product-description-en" value={descriptionEn} onChange={(event) => setDescriptionEn(event.target.value)} required maxLength={5000} /></div>
         <div className="field wide"><label htmlFor="edit-product-description-bn">Description (বাংলা)</label><textarea id="edit-product-description-bn" value={descriptionBn} onChange={(event) => setDescriptionBn(event.target.value)} maxLength={5000} /></div>
+        <div className="field wide"><label htmlFor="edit-product-details">Product details / specifications (optional)</label><textarea id="edit-product-details" value={productDetails} onChange={(event) => setProductDetails(event.target.value)} maxLength={3000} rows={5} placeholder={"Color: Black\nSize: 10 hands\nBrand: Example"} /><small className="subtle">Add color, size or measurements, brand, material, and other product facts. Use a new line for each detail.</small></div>
         <div className="field"><label htmlFor="edit-product-category">Category</label><select id="edit-product-category" value={category} required onChange={(event) => changeCategory(event.target.value)}><option value="" disabled>Select a category</option>{categories.map((item) => <option key={item._id} value={item._id}>{item.name.en}</option>)}</select></div>
+        {(categories.find((item) => item._id === category)?.attributeDefinitions ?? []).filter((attribute) => attribute.active !== false).sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0)).map((attribute) => <div className="field" key={attribute.key}>
+          <label>{attribute.name.en}{attribute.name.bn ? ` / ${attribute.name.bn}` : ""}{attribute.required ? " *" : ""}</label>
+          {attribute.type === "text" && <input value={String(attributeValues[attribute.key] ?? "")} required={attribute.required} maxLength={200} onChange={(event) => setAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value }))} />}
+          {attribute.type === "number" && <input type="number" step="0.01" value={typeof attributeValues[attribute.key] === "number" ? String(attributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value === "" ? "" : Number(event.target.value) }))} />}
+          {attribute.type === "boolean" && <select value={typeof attributeValues[attribute.key] === "boolean" ? String(attributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value === "true" }))}><option value="" disabled>Select</option><option value="true">Yes</option><option value="false">No</option></select>}
+          {(attribute.type === "select" || attribute.type === "colour") && <select value={typeof attributeValues[attribute.key] === "string" ? String(attributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value }))}><option value="" disabled>Select</option>{(attribute.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.name?.en || option.name?.bn || option.value}{option.hex ? ` · ${option.hex}` : ""}</option>)}</select>}
+          {attribute.type === "multiselect" && <div>{(attribute.options ?? []).map((option) => {
+            const selected = Array.isArray(attributeValues[attribute.key]) ? attributeValues[attribute.key] as string[] : [];
+            return <label className="admin-check" key={option.value}><input type="checkbox" checked={selected.includes(option.value)} onChange={(event) => setAttributeValues((current) => {
+              const currentSelected = Array.isArray(current[attribute.key]) ? current[attribute.key] as string[] : [];
+              return { ...current, [attribute.key]: event.target.checked ? [...currentSelected, option.value] : currentSelected.filter((value) => value !== option.value) };
+            })} />{option.name?.en || option.name?.bn || option.value}</label>;
+          })}</div>}
+        </div>)}
         <div className="field"><label htmlFor="edit-product-unit">{variants.length ? "Stock counted in" : "Selling unit"}</label><select id="edit-product-unit" value={unit} disabled={variants.length > 0} onChange={(event) => setUnit(event.target.value as ProductUnit)}>{productUnits.map((item) => <option key={item} value={item}>{unitLabel(item)}</option>)}</select></div>
 
         {variants.length ? <div className="wide product-variants-field">
-          <div className="product-variants-heading"><div><strong>Option prices and stock</strong><small>These prices are for each selected size or pack. Removing every option returns this product to one price per selling unit.</small></div><button type="button" className="button-secondary" disabled={variants.length >= 30} onClick={() => setVariants((current) => [...current, { label: "", price: "", stock: "" }])}>Add option</button></div>
+          <div className="product-variants-heading"><div><strong>Variants, prices and stock</strong><small>Add a color variant or a size/pack option. Each selected variant has its own price and stock.</small></div><div className="product-editor-option-actions"><button type="button" className="button-secondary" disabled={variants.length >= 30} onClick={() => setVariants((current) => [...current, { label: "", price: "", stock: "" }])}>Add option</button><button type="button" className="button-secondary" disabled={variants.length >= 30} onClick={() => setVariants((current) => [...current, { label: "", colorHex: "#000000", price: "", stock: "" }])}>Add color variant</button></div></div>
           {variants.map((variant, index) => <div className="product-variant-row" key={variant.id ?? `new-${index}`}>
-            <div className="field"><label htmlFor={`edit-option-label-${index}`}>Size / option</label><input id={`edit-option-label-${index}`} value={variant.label} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} required maxLength={60} /></div>
+            <div className="field"><label htmlFor={`edit-option-label-${index}`}>{variant.colorHex ? "Color name" : "Size / option"}</label><input id={`edit-option-label-${index}`} value={variant.label} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} required maxLength={60} /></div>
+            {variant.colorHex && <div className="field"><label htmlFor={`edit-option-color-${index}`}>Color</label><input id={`edit-option-color-${index}`} type="color" value={variant.colorHex} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, colorHex: event.target.value.toUpperCase() } : item))} /></div>}
             <div className="field"><label htmlFor={`edit-option-price-${index}`}>Price per option (৳)</label><input id={`edit-option-price-${index}`} type="number" min="0" step="0.01" value={variant.price} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, price: event.target.value } : item))} required /></div>
             <div className="field"><label htmlFor={`edit-option-stock-${index}`}>Stock ({unitLabel(unit)})</label><input id={`edit-option-stock-${index}`} type="number" min="0" step={quantityStep(unit)} value={variant.stock} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, stock: event.target.value } : item))} required /></div>
+            <div className="field"><label htmlFor={`edit-option-sku-${index}`}>SKU (optional)</label><input id={`edit-option-sku-${index}`} value={variant.sku ?? ""} maxLength={80} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, sku: event.target.value } : item))} /></div>
+            <div className="field"><label htmlFor={`edit-option-availability-${index}`}>Availability</label><select id={`edit-option-availability-${index}`} value={variant.availability ?? "in_stock"} onChange={(event) => setVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, availability: event.target.value as "in_stock" | "out_of_stock" | "preorder" } : item))}><option value="in_stock">In stock</option><option value="preorder">Preorder</option><option value="out_of_stock">Out of stock</option></select></div>
             <button type="button" className="remove-variant-button" aria-label={`Remove ${variant.label || `option ${index + 1}`}`} onClick={() => setVariants((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
           </div>)}
         </div> : <>
-          <div className="wide unit-options-toggle"><span>This product has no saved size/volume options yet. Add options to set a separate price and stock for each size or pack.</span><div className="product-editor-option-actions">{categoryProductPreset(categories.find((item) => item._id === category)) && <button type="button" className="button-secondary" onClick={() => changeCategory(category)}>Use category suggestions</button>}<button type="button" className="button-secondary" onClick={() => setVariants([{ label: "", price: "", stock: "" }])}>Add custom option</button></div></div>
+          <div className="wide unit-options-toggle"><span>This product has no saved variants yet. Add color variants or size/pack options with separate prices and stock.</span><div className="product-editor-option-actions">{categoryProductPreset(categories.find((item) => item._id === category)) && <button type="button" className="button-secondary" onClick={() => changeCategory(category)}>Use category suggestions</button>}<button type="button" className="button-secondary" onClick={() => setVariants([{ label: "", price: "", stock: "" }])}>Add size / pack option</button><button type="button" className="button-secondary" onClick={() => setVariants([{ label: "", colorHex: "#000000", price: "", stock: "" }])}>Add color variant</button></div></div>
           <div className="field"><label htmlFor="edit-product-price">Regular price per {unitLabel(unit)} (৳)</label><input id="edit-product-price" type="number" min="0" step="0.01" value={price} onChange={(event) => setPrice(event.target.value)} required /></div>
           <div className="field"><label htmlFor="edit-product-discount">Sale price per {unitLabel(unit)} (৳, optional)</label><input id="edit-product-discount" type="number" min="0" step="0.01" value={discountPrice} onChange={(event) => setDiscountPrice(event.target.value)} /></div>
-          <div className="field"><label htmlFor="edit-reseller-price">Reseller price per {unitLabel(unit)} (৳, optional)</label><input id="edit-reseller-price" type="number" min="0" step="0.01" value={resellerPrice} onChange={(event) => setResellerPrice(event.target.value)} /></div>
-          <div className="field"><label htmlFor="edit-reseller-moq">Reseller MOQ ({unitLabel(unit)})</label><input id="edit-reseller-moq" type="number" min="0.01" step={quantityStep(unit)} value={resellerMoq} onChange={(event) => setResellerMoq(event.target.value)} /></div>
-          <div className="field"><label htmlFor="edit-wholesaler-price">Wholesaler price per {unitLabel(unit)} (৳, optional)</label><input id="edit-wholesaler-price" type="number" min="0" step="0.01" value={wholesalerPrice} onChange={(event) => setWholesalerPrice(event.target.value)} /></div>
-          <div className="field"><label htmlFor="edit-wholesaler-moq">Wholesaler MOQ ({unitLabel(unit)})</label><input id="edit-wholesaler-moq" type="number" min="0.01" step={quantityStep(unit)} value={wholesalerMoq} onChange={(event) => setWholesalerMoq(event.target.value)} /></div>
           <div className="field"><label htmlFor="edit-product-stock">Stock ({unitLabel(unit)})</label><input id="edit-product-stock" type="number" min="0" step={quantityStep(unit)} value={stock} onChange={(event) => setStock(event.target.value)} required /></div>
         </>}
 

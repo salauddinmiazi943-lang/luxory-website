@@ -3,15 +3,20 @@ import { z } from "zod";
 import { connectDb } from "@/lib/db";
 import { Product, ProductComment } from "@/lib/models";
 import { requireUser } from "@/lib/auth";
-import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
+import { apiError, clientKey, cloudinaryUrl, rateLimit, readJson } from "@/lib/http";
 
 const commentSchema = z.object({
   message: z.string().trim().min(2).max(2000),
+  rating: z.number().int().min(1).max(5),
+  images: z.array(cloudinaryUrl()).max(4).default([]),
 });
 type Context = { params: Promise<{ id: string }> };
 
 async function findProduct(id: string) {
-  return Product.findOne(mongoose.isValidObjectId(id) ? { _id: id } : { slug: id })
+  return Product.findOne({
+    ...(mongoose.isValidObjectId(id) ? { _id: id } : { slug: id }),
+    deletedAt: { $exists: false },
+  })
     .select("_id active approved")
     .lean();
 }
@@ -25,7 +30,7 @@ export async function GET(_request: Request, { params }: Context) {
       return Response.json({ error: "Product not found" }, { status: 404 });
     }
     const items = await ProductComment.find({ product: product._id })
-      .select("customerName message createdAt adminReply repliedAt")
+      .select("customerName message rating images createdAt adminReply repliedAt")
       .sort({ createdAt: -1 })
       .limit(100)
       .lean();
@@ -55,12 +60,16 @@ export async function POST(request: Request, { params }: Context) {
       customer: access.user.id,
       customerName: access.user.name,
       message: parsed.data.message,
+      rating: parsed.data.rating,
+      images: parsed.data.images,
     });
     return Response.json({
       item: {
         _id: String(item._id),
         customerName: item.customerName,
         message: item.message,
+        rating: item.rating,
+        images: item.images,
         createdAt: item.createdAt,
         adminReply: "",
       },

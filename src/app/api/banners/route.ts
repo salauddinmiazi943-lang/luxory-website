@@ -6,7 +6,21 @@ import { apiError, cloudinaryUrl, readJson, safeLink, translated } from "@/lib/h
 
 const localized = z.object({ en: z.string().trim().min(1).max(500), bn: z.string().trim().max(500).optional() });
 const optionalLocalized = z.object({ en: z.string().trim().max(120).optional(), bn: z.string().trim().max(120).optional() }).optional();
-const optionalBannerLink = z.preprocess((value) => (typeof value === "string" ? value.trim() : value), z.union([z.literal(""), safeLink()]));
+const optionalBannerLink = (requestOrigin: string) => z.preprocess((value) => {
+  if (typeof value !== "string") return value;
+  const link = value.trim();
+  if (!link.toLowerCase().startsWith("http://")) return link;
+  try {
+    const url = new URL(link);
+    const localHosts = ["localhost", "127.0.0.1", "0.0.0.0", "[::1]"];
+    if (url.origin === requestOrigin || localHosts.includes(url.hostname)) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch {
+    return link;
+  }
+  return link;
+}, z.union([z.literal(""), safeLink()]));
 const optionalScheduleDate = z.preprocess((value) => {
   if (value === "" || value == null) return undefined;
   if (value instanceof Date) return value;
@@ -20,7 +34,7 @@ const optionalBgColor = z.preprocess((value) => {
   if (value === "" || value == null) return undefined;
   return typeof value === "string" ? value.trim() : value;
 }, z.string().max(120).optional());
-const schema = z.object({ image: cloudinaryUrl(), title: localized, subtitle: localized, buttonText: optionalLocalized, bgColor: optionalBgColor, link: optionalBannerLink.default(""), order: z.number().int().default(0), active: z.boolean().default(true), startDate: optionalScheduleDate, endDate: optionalScheduleDate });
+const schema = (requestOrigin: string) => z.object({ image: cloudinaryUrl(), title: localized, subtitle: localized, buttonText: optionalLocalized, bgColor: optionalBgColor, link: optionalBannerLink(requestOrigin).default(""), order: z.number().int().default(0), active: z.boolean().default(true), startDate: optionalScheduleDate, endDate: optionalScheduleDate });
 
 export async function GET(request: Request) {
   try {
@@ -49,7 +63,7 @@ export async function POST(request: Request) {
   const access = await requirePermission("manage_banners");
   if ("error" in access) return access.error;
   try {
-    const parsed = await readJson(request, schema);
+    const parsed = await readJson(request, schema(new URL(request.url).origin));
     if ("error" in parsed) return parsed.error;
     if (parsed.data.startDate && parsed.data.endDate && parsed.data.startDate > parsed.data.endDate) {
       return Response.json({ error: "End date must be on or after start date" }, { status: 400 });

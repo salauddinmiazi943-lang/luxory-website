@@ -22,7 +22,7 @@ export async function GET() {
     const items = lines.flatMap((line) => {
       const product = products.find((candidate) => String(candidate._id) === String(line.productId));
       if (!product) return [];
-      const variants = product.variants as { _id: unknown; stock: number; price: number; label: string }[] | undefined;
+      const variants = product.variants as { _id: unknown; stock: number; price: number; label: string; images?: string[] }[] | undefined;
       const variant = line.variantId ? variants?.find((option) => String(option._id) === String(line.variantId)) : undefined;
       if (line.variantId && !variant) return [];
       if (!line.variantId && variants?.length) return [];
@@ -31,7 +31,7 @@ export async function GET() {
       return [{
         id: String(product._id), slug: product.slug, name: product.title.en, image: product.images[0] ?? "",
         price, quantity: Math.min(line.quantity, stock), unit: product.unit ?? "piece",
-        ...(variant ? { variantId: String(variant._id), variantLabel: variant.label } : {}),
+        ...(variant ? { variantId: String(variant._id), variantLabel: variant.label, variantImage: variant.images?.[0] ?? "" } : {}),
       }].filter((item) => item.quantity > 0);
     });
     return Response.json({ items });

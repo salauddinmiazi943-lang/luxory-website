@@ -2,10 +2,10 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
 import type { HeroSlide } from "@/config/banners";
 
-type Labels = { featured: string; previous: string; next: string; goTo: (index: number) => string };
+type Labels = { featured: string; previous: string; next: string; pause: string; play: string; goTo: (index: number) => string };
 type Locale = "en" | "bn";
 
 type Props = {
@@ -22,9 +22,8 @@ const pick = (value: { en?: string; bn?: string } | undefined, locale: Locale) =
 
 export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transitionMs = 800, swipeThreshold = 45 }: Props) {
   const [index, setIndex] = useState(0);
-  const [hovered, setHovered] = useState(false);
+  const [paused, setPaused] = useState(false);
   const [visible, setVisible] = useState(true);
-  const [reduced, setReduced] = useState(false);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
 
   const count = slides.length;
@@ -40,14 +39,6 @@ export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transiti
   }, [count]);
 
   useEffect(() => {
-    const query = window.matchMedia("(prefers-reduced-motion: reduce)");
-    const sync = () => setReduced(query.matches);
-    sync();
-    query.addEventListener("change", sync);
-    return () => query.removeEventListener("change", sync);
-  }, []);
-
-  useEffect(() => {
     const onVisibility = () => setVisible(!document.hidden);
     onVisibility();
     document.addEventListener("visibilitychange", onVisibility);
@@ -55,10 +46,10 @@ export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transiti
   }, []);
 
   useEffect(() => {
-    if (count < 2 || hovered || !visible || reduced) return;
+    if (count < 2 || paused || !visible) return;
     const timer = window.setTimeout(() => step(1), autoplayMs);
     return () => window.clearTimeout(timer);
-  }, [activeIndex, count, hovered, visible, reduced, autoplayMs, step]);
+  }, [activeIndex, count, paused, visible, autoplayMs, step]);
 
   const onTouchStart = (event: React.TouchEvent<HTMLDivElement>) => {
     const point = event.touches[0];
@@ -89,10 +80,6 @@ export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transiti
         className="hero-slider-stage"
         tabIndex={0}
         onKeyDown={onKeyDown}
-        onMouseEnter={() => setHovered(true)}
-        onMouseLeave={() => setHovered(false)}
-        onFocus={() => setHovered(true)}
-        onBlur={() => setHovered(false)}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
@@ -109,7 +96,7 @@ export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transiti
               aria-hidden={!active}
               tabIndex={active ? 0 : -1}
               draggable={false}
-              style={active ? { transitionDuration: `${transitionMs}ms` } : undefined}
+              style={{ transitionDuration: `${transitionMs}ms` }}
             >
               <picture>
                 <source media="(max-width: 767px)" srcSet={slide.mobileImage} />
@@ -154,6 +141,15 @@ export function HeroSlider({ slides, labels, locale, autoplayMs = 7500, transiti
                 />
               ))}
             </div>
+            <button
+              type="button"
+              className="hero-slider-pause"
+              aria-label={paused ? labels.play : labels.pause}
+              aria-pressed={paused}
+              onClick={() => setPaused((current) => !current)}
+            >
+              {paused ? <Play size={15} /> : <Pause size={15} />}
+            </button>
           </>
         ) : null}
       </div>

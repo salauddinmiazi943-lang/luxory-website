@@ -15,7 +15,7 @@ export async function GET() {
     const canSeeVendors = hasPermission(access.user, "manage_vendors");
     const [orders, products, vendors, pendingApplications] = await Promise.all([
       canSeeOrders ? Order.countDocuments() : 0,
-      canSeeProducts ? Product.countDocuments() : 0,
+      canSeeProducts ? Product.countDocuments({ deletedAt: { $exists: false } }) : 0,
       canSeeVendors ? User.countDocuments({ role: "vendor", status: "active" }) : 0,
       canSeeVendors ? VendorApplication.countDocuments({ status: "pending" }) : 0,
     ]);

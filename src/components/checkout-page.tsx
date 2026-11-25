@@ -14,7 +14,7 @@ type CoinConfigResponse = {
   settings?: { coinRedemption?: { minimumRedeemCoins?: number; coinsPer1Taka?: number; maxRedeemPercentPerOrder?: number } };
   canRedeem?: boolean;
 };
-type PaymentMethodItem = { method: string; label: string; enabled: boolean; accountNumber: string; accountName: string; instructions: string };
+type PaymentMethodItem = { method: "COD" | "BKASH" | "NAGAD" | "ROCKET" | "BANK"; label: string; enabled: boolean; accountNumber: string; accountName: string; instructions: string };
 type DeliveryConfig = { deliveryChargeEnabled: boolean; insideDhakaCharge: number; outsideDhakaCharge: number; freeDeliveryEnabled: boolean; freeDeliveryThreshold: number };
 
 export function CheckoutPage() {
@@ -27,13 +27,9 @@ export function CheckoutPage() {
   const [customerSignedIn, setCustomerSignedIn] = useState(false);
   const [loadedDirectCheckout, setLoadedDirectCheckout] = useState<{ key: string; item?: CartLine; error?: string } | null>(null);
   const [deliveryConfig, setDeliveryConfig] = useState<DeliveryConfig>({ deliveryChargeEnabled: true, insideDhakaCharge: 60, outsideDhakaCharge: 120, freeDeliveryEnabled: false, freeDeliveryThreshold: 5000 });
-  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodItem[]>([
-    { method: "COD", label: "Cash on Delivery", enabled: true, accountNumber: "", accountName: "", instructions: "Pay when your order is delivered." },
-    { method: "BKASH", label: "bKash", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "NAGAD", label: "Nagad", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "ROCKET", label: "Rocket", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "BANK", label: "Bank Transfer", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-  ]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethodItem[]>([]);
+  const [paymentConfigLoading, setPaymentConfigLoading] = useState(true);
+  const [paymentConfigError, setPaymentConfigError] = useState("");
   const [coinConfig, setCoinConfig] = useState<{ balanceCoins: number; minimumRedeemCoins: number; coinsPer1Taka: number; maxRedeemPercentPerOrder: number; canRedeem: boolean } | null>(null);
   const [redeemCoins, setRedeemCoins] = useState(0);
   const [voucherCode, setVoucherCode] = useState("");
@@ -65,11 +61,19 @@ export function CheckoutPage() {
       const cr = d?.settings?.coinRedemption;
       if (cr) setCoinConfig({ balanceCoins: Number(d?.wallet?.balanceCoins ?? 0), minimumRedeemCoins: Number(cr.minimumRedeemCoins ?? 0), coinsPer1Taka: Number(cr.coinsPer1Taka ?? 0), maxRedeemPercentPerOrder: Number(cr.maxRedeemPercentPerOrder ?? 0), canRedeem: Boolean(d?.canRedeem) });
     }).catch(() => {});
-    fetch("/api/checkout/config").then((r) => r.ok ? r.json() : null).then((d: { delivery?: DeliveryConfig; paymentMethods?: PaymentMethodItem[] } | null) => {
-      if (!active || !d) return;
+    fetch("/api/checkout/config").then(async (response) => {
+      const data = await response.json() as { delivery?: DeliveryConfig; paymentMethods?: PaymentMethodItem[]; error?: string };
+      if (!response.ok) throw new Error(data.error || "Could not load checkout settings.");
+      return data;
+    }).then((d) => {
+      if (!active) return;
       if (d.delivery) setDeliveryConfig(d.delivery);
-      if (Array.isArray(d.paymentMethods) && d.paymentMethods.length) setPaymentMethods(d.paymentMethods);
-    }).catch(() => {});
+      if (Array.isArray(d.paymentMethods)) setPaymentMethods(d.paymentMethods);
+    }).catch((reason: unknown) => {
+      if (active) setPaymentConfigError(reason instanceof Error ? reason.message : "Could not load payment options.");
+    }).finally(() => {
+      if (active) setPaymentConfigLoading(false);
+    });
     return () => { active = false; };
   }, []);
 
@@ -100,7 +104,7 @@ export function CheckoutPage() {
     (async () => {
       try {
         const response = await fetch(`/api/products/${encodeURIComponent(productId)}`, { signal: AbortSignal.timeout(15_000) });
-        const result = await response.json() as { item?: { _id: string; slug: string; title: { en: string; bn?: string }; images?: string[]; price: number; discountPrice?: number; stock?: number; unit?: string; variants?: { _id?: string; label: string; price: number; stock: number }[] }; error?: string };
+        const result = await response.json() as { item?: { _id: string; slug: string; title: { en: string; bn?: string }; images?: string[]; price: number; discountPrice?: number; stock?: number; unit?: string; variants?: { _id?: string; label: string; price: number; stock: number; images?: string[] }[] }; error?: string };
         if (!response.ok || !result.item) throw new Error(result.error || t("couldNotLoadProduct"));
         const product = result.item;
         const variant = buyNowVariantId ? product.variants?.find((option) => option._id === buyNowVariantId) : undefined;
@@ -108,7 +112,7 @@ export function CheckoutPage() {
         if (!buyNowVariantId && product.variants?.length) throw new Error(t("selectProductOption"));
         const quantity = Number(buyNowQuantity);
         if (!Number.isFinite(quantity) || quantity <= 0 || quantity > (variant?.stock ?? product.stock ?? 0)) throw new Error(t("selectedQuantityUnavailable"));
-        const item: CartLine = { id: product._id, slug: product.slug, name: product.title[locale] || product.title.en, image: product.images?.[0] ?? "", price: variant?.price ?? product.discountPrice ?? product.price, quantity, unit: product.unit ?? "piece", ...(variant?._id ? { variantId: variant._id, variantLabel: variant.label } : {}) };
+        const item: CartLine = { id: product._id, slug: product.slug, name: product.title[locale] || product.title.en, image: variant?.images?.[0] ?? product.images?.[0] ?? "", price: variant?.price ?? product.discountPrice ?? product.price, quantity, unit: product.unit ?? "piece", ...(variant?._id ? { variantId: variant._id, variantLabel: variant.label, variantImage: variant.images?.[0] } : {}) };
         if (active) setLoadedDirectCheckout({ key: buyNowKey, item });
       } catch (reason) {
         if (active) setLoadedDirectCheckout({ key: buyNowKey, error: reason instanceof Error ? reason.message : t("couldNotLoadProduct") });
@@ -132,9 +136,9 @@ export function CheckoutPage() {
   const effectiveVoucherDiscount = voucherStatus === "valid" ? Math.min(voucherDiscount, Math.max(0, subtotal + deliveryCharge - coinDiscount)) : 0;
   const total = Math.max(0, subtotal + deliveryCharge - coinDiscount - effectiveVoucherDiscount);
 
-  const activeMethod = paymentMethods.find((m) => m.method === paymentMethod) ?? paymentMethods[0];
   const enabledMethods = paymentMethods.filter((m) => m.enabled !== false);
-  const selectedPayment = (enabledMethods.some((m) => m.method === paymentMethod) ? paymentMethod : (enabledMethods[0]?.method as typeof paymentMethod | undefined)) ?? "COD";
+  const activeMethod = enabledMethods.find((m) => m.method === paymentMethod) ?? enabledMethods[0];
+  const selectedPayment = activeMethod?.method ?? "";
 
   async function applyVoucher() {
     const code = voucherCode.trim();
@@ -154,6 +158,7 @@ export function CheckoutPage() {
     setBusy(true);
     try {
       const payMethod = selectedPayment;
+    if (!payMethod) throw new Error("No payment method is currently available.");
       if (payMethod !== "COD") {
         const trx = paymentTransactionId.trim();
         if (!/^[0-9A-Za-z]{6,20}$/.test(trx)) throw new Error("Enter a valid Transaction/Reference ID (6-20 chars).");
@@ -212,27 +217,27 @@ export function CheckoutPage() {
         {customerSignedIn && savedAddresses.length > 0 && <div className="field"><label htmlFor="savedAddress">{t("savedAddresses")}</label><select id="savedAddress" value={savedAddressId} onChange={(e) => { const a = savedAddresses.find((x) => x._id === e.target.value); setSavedAddressId(e.target.value); if (a) setAddressFields((c) => ({ ...c, name: a.name, phone: a.phone, address: a.address })); }}><option value="">{t("newDeliveryAddress")}</option>{savedAddresses.map((a, i) => <option key={a._id ?? i} value={a._id ?? ""}>{a.label || a.name}</option>)}</select></div>}
         <div className="field"><label htmlFor="name">পুরো নাম (Full Name) *</label><input id="name" name="name" autoComplete="name" value={addressFields.name} onChange={(e) => setAddressFields((c) => ({ ...c, name: e.target.value }))} required minLength={2} maxLength={120} /></div>
         <div className="field"><label htmlFor="phone">ফোন নম্বর (Phone Number) *</label><input id="phone" name="phone" type="tel" autoComplete="tel" value={addressFields.phone} onChange={(e) => setAddressFields((c) => ({ ...c, phone: e.target.value }))} required minLength={6} maxLength={30} /></div>
-        <div className="field"><label htmlFor="deliveryArea">ডেলিভারি এলাকা (Delivery Area) *</label><select id="deliveryArea" value={deliveryArea} onChange={(e) => setDeliveryArea(e.target.value as "inside_dhaka" | "outside_dhaka")} required><option value="inside_dhaka">ঢাকার ভেতরে (Inside Dhaka)</option><option value="outside_dhaka">ঢাকার বাইরে (Outside Dhaka)</option></select><small className="subtle">ডেলিভারি চার্জ এলাকা ও অর্ডারের মোট টাকার ওপর ভিত্তি করে স্বয়ংক্রিয়ভাবে হিসাব হবে।{deliveryConfig.freeDeliveryEnabled ? ` ${formatBdt(deliveryConfig.freeDeliveryThreshold)} বা তার বেশি অর্ডারে ডেলিভারি ফ্রি।` : ""}</small></div>
+        <div className="field"><label htmlFor="deliveryArea">ডেলিভারি এলাকা (Delivery Area) *</label><select id="deliveryArea" value={deliveryArea} onChange={(e) => setDeliveryArea(e.target.value as "inside_dhaka" | "outside_dhaka")} required><option value="inside_dhaka">ঢাকার ভেতরে (Inside Dhaka)</option><option value="outside_dhaka">ঢাকার বাইরে (Outside Dhaka)</option></select><small className="subtle">{deliveryConfig.deliveryChargeEnabled ? `এলাকা অনুযায়ী ডেলিভারি চার্জ হবে।${deliveryConfig.freeDeliveryEnabled ? ` ${formatBdt(deliveryConfig.freeDeliveryThreshold)} বা তার বেশি অর্ডারে অতিরিক্ত ফ্রি ডেলিভারি প্রযোজ্য।` : ""}` : "সব অর্ডারে ফ্রি ডেলিভারি চালু আছে।"}</small></div>
         <div className="field"><label htmlFor="address">সম্পূর্ণ ঠিকানা (Full Address) *</label><textarea id="address" name="address" autoComplete="street-address" value={addressFields.address} onChange={(e) => setAddressFields((c) => ({ ...c, address: e.target.value }))} required minLength={5} maxLength={500} placeholder="বাসা/হোল্ডিং, রোড, এলাকা, থানা/জেলা" /></div>
         <div className="field"><label htmlFor="notes">অর্ডার নোট (Order Note) — ঐচ্ছিক</label><textarea id="notes" name="notes" value={addressFields.notes} onChange={(e) => setAddressFields((c) => ({ ...c, notes: e.target.value }))} maxLength={2000} placeholder="ডেলিভারি সম্পর্কিত বিশেষ নির্দেশনা থাকলে লিখুন" /></div>
 
         <fieldset className="checkout-payment-options">
           <legend>{t("paymentMethod")} / পেমেন্ট পদ্ধতি</legend>
-          {(paymentMethods.length ? paymentMethods : enabledMethods).map((m) => (
-            <label key={m.method}><input type="radio" name="payment" value={m.method} checked={selectedPayment === m.method} onChange={() => setPaymentMethod(m.method as typeof paymentMethod)} disabled={m.enabled === false} /> {m.label || m.method}{m.enabled === false ? " (বন্ধ)" : ""}</label>
-          ))}
-          {selectedPayment === "COD" ? <p className="subtle">পণ্য হাতে পেয়ে মূল্য পরিশোধ করুন (Cash on Delivery)।</p> : <div className="stack" style={{ marginTop: 8 }}>
-            <div className="subtle" style={{ display: "grid", gap: 4 }}>
-              <p style={{ margin: 0 }}><strong>{(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.label || selectedPayment}</strong> পেমেন্ট নির্দেশনা:</p>
-              {(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.accountName ? <p style={{ margin: 0 }}>Account/Merchant: <strong>{(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.accountName}</strong></p> : null}
-              {(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.accountNumber ? <p style={{ margin: 0 }}>Account Number: <strong>{(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.accountNumber}</strong></p> : <p style={{ margin: 0 }}>Account Number: অ্যাডমিন প্যানেল থেকে সেট করা হলে এখানে দেখানো হবে।</p>}
-              <p style={{ margin: 0 }}>{(paymentMethods.find((m) => m.method === selectedPayment) ?? activeMethod)?.instructions || "পেমেন্ট করে নিচের তথ্য দিন।"} মোট পরিশোধযোগ্য: <strong>{formatBdt(total)}</strong></p>
-            </div>
-            {selectedPayment === "BANK" ? <div className="field"><label htmlFor="senderInfo">Sender Bank Account Info *</label><input id="senderInfo" value={paymentSenderAccountInfo} onChange={(e) => setPaymentSenderAccountInfo(e.target.value)} maxLength={200} placeholder="Account name / number / bank" required /></div> : <div className="field"><label htmlFor="sender">Sender Number *</label><input id="sender" inputMode="numeric" value={paymentSenderNumber} onChange={(e) => setPaymentSenderNumber(e.target.value.replace(/\D/g, ""))} maxLength={11} placeholder="01XXXXXXXXX" required /></div>}
-            <div className="field"><label htmlFor="trx">Transaction / Reference ID *</label><input id="trx" value={paymentTransactionId} onChange={(e) => setPaymentTransactionId(e.target.value.toUpperCase())} maxLength={20} placeholder="e.g. 9AB7C8D9E0" required /></div>
-          </div>}
+          {paymentConfigLoading ? <p className="subtle">পেমেন্ট পদ্ধতি লোড হচ্ছে…</p> : paymentConfigError ? <p className="form-error" role="alert">{paymentConfigError}</p> : enabledMethods.length === 0 ? <p className="form-error" role="alert">এই মুহূর্তে কোনো পেমেন্ট পদ্ধতি চালু নেই। অনুগ্রহ করে দোকানের সঙ্গে যোগাযোগ করুন।</p> : <>
+            {enabledMethods.map((m) => <label key={m.method}><input type="radio" name="payment" value={m.method} checked={selectedPayment === m.method} onChange={() => setPaymentMethod(m.method)} /> {m.label || m.method}</label>)}
+            {selectedPayment === "COD" ? <p className="subtle">পণ্য হাতে পেয়ে মূল্য পরিশোধ করুন (Cash on Delivery)।</p> : selectedPayment ? <div className="stack" style={{ marginTop: 8 }}>
+              <div className="subtle" style={{ display: "grid", gap: 4 }}>
+                <p style={{ margin: 0 }}><strong>{activeMethod?.label || selectedPayment}</strong> পেমেন্ট নির্দেশনা:</p>
+                {activeMethod?.accountName ? <p style={{ margin: 0 }}>Account/Merchant: <strong>{activeMethod.accountName}</strong></p> : null}
+                {activeMethod?.accountNumber ? <p style={{ margin: 0 }}>Account Number: <strong>{activeMethod.accountNumber}</strong></p> : <p style={{ margin: 0 }}>Account Number: অ্যাডমিন প্যানেল থেকে সেট করা হলে এখানে দেখানো হবে।</p>}
+                <p style={{ margin: 0 }}>{activeMethod?.instructions || "পেমেন্ট করে নিচের তথ্য দিন।"} মোট পরিশোধযোগ্য: <strong>{formatBdt(total)}</strong></p>
+              </div>
+              {selectedPayment === "BANK" ? <div className="field"><label htmlFor="senderInfo">Sender Bank Account Info *</label><input id="senderInfo" value={paymentSenderAccountInfo} onChange={(e) => setPaymentSenderAccountInfo(e.target.value)} maxLength={200} placeholder="Account name / number / bank" required /></div> : <div className="field"><label htmlFor="sender">Sender Number *</label><input id="sender" inputMode="numeric" value={paymentSenderNumber} onChange={(e) => setPaymentSenderNumber(e.target.value.replace(/\D/g, ""))} maxLength={11} placeholder="01XXXXXXXXX" required /></div>}
+              <div className="field"><label htmlFor="trx">Transaction / Reference ID *</label><input id="trx" value={paymentTransactionId} onChange={(e) => setPaymentTransactionId(e.target.value.toUpperCase())} maxLength={20} placeholder="e.g. 9AB7C8D9E0" required /></div>
+            </div> : null}
+          </>}
         </fieldset>
-        <button className="button-primary" disabled={busy}>{busy ? t("placingOrder") : `${t("placeOrder")} · ${formatBdt(total)}`}</button>
+        <button className="button-primary" disabled={busy || paymentConfigLoading || Boolean(paymentConfigError) || enabledMethods.length === 0}>{busy ? t("placingOrder") : `${t("placeOrder")} · ${formatBdt(total)}`}</button>
       </form>
 
       <aside className="dashboard-card checkout-summary">

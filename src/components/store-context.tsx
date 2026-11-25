@@ -6,7 +6,7 @@ import bn from "@/messages/bn.json";
 import { normalizeQuantity } from "@/lib/product-units";
 
 export type Locale = "en" | "bn";
-export type CartLine = { id: string; slug: string; name: string; image: string; originalPrice?: number; price: number; quantity: number; unit?: string; variantId?: string; variantLabel?: string };
+export type CartLine = { id: string; slug: string; name: string; image: string; originalPrice?: number; price: number; quantity: number; unit?: string; variantId?: string; variantLabel?: string; variantImage?: string };
 export const cartLineKey = (line: Pick<CartLine, "id" | "variantId">) => `${line.id}:${line.variantId ?? ""}`;
 export type WishlistItem = {
   _id?: string;

@@ -57,6 +57,8 @@ export function HomeStorefront() {
         featured: t("featuredOffers"),
         previous: t("previousSlide"),
         next: t("nextSlide"),
+        pause: t("pauseSlideshow"),
+        play: t("playSlideshow"),
         goTo: (index) => `${t("goToSlide")} ${index}`,
       }}
     />
@@ -84,14 +86,6 @@ export function HomeStorefront() {
     </div>
     <ProductSection title={t("newProducts")} />
     <ProductSection title={t("featured")} featured />
-    <section className="section wrap"><div className="section-heading"><div><p className="eyebrow">{t("eyebrowEveryday")}</p><h2>{t("categories")}</h2></div><Link className="text-link" href="/products">{t("viewAll")} <ArrowRight size={16} /></Link></div>
-      <div className="category-grid">{(categories.length ? categories : [
-        { _id: "smartphones", slug: "smartphones", name: { en: "Smartphones", bn: "স্মার্টফোন" } },
-        { _id: "headphones", slug: "headphones", name: { en: "Headphones", bn: "হেডফোন" } },
-        { _id: "smart-watches", slug: "smart-watches", name: { en: "Smart watches", bn: "স্মার্ট ঘড়ি" } },
-        { _id: "accessories", slug: "accessories", name: { en: "Accessories", bn: "আনুষঙ্গিক" } },
-      ]).slice(0, 8).map((category, index) => <Link className="category-tile" key={category._id} href={`/category/${category.slug}`}>{category.image?.startsWith("https://res.cloudinary.com/") && <Image src={category.image} alt="" fill sizes="(max-width: 650px) 50vw, 25vw" style={{ objectFit: "cover", opacity: .25 }} />}<strong>{category.name[locale] || category.name.en}</strong><span>{["◉", "◌", "⌚", "◈"][index % 4]}</span></Link>)}</div>
-    </section>
     <ProductSection title={t("bestSeller")} bestSeller />
       <HomeCategorySections />
     <section className="sale-banner"><div className="wrap sale-inner"><div><p className="eyebrow">{t("eyebrowFreshSeason")}</p><h2>{t("springSale")}</h2><p>{t("springSaleText")}</p><div className="countdown-timer" aria-label="Spring sale countdown"><CountdownUnit label={t("countdownDays")} value={Math.floor(remaining / 86_400_000)} /><CountdownUnit label={t("countdownHours")} value={Math.floor((remaining / 3_600_000) % 24)} /><CountdownUnit label={t("countdownMinutes")} value={Math.floor((remaining / 60_000) % 60)} /><CountdownUnit label={t("countdownSeconds")} value={Math.floor((remaining / 1000) % 60)} /></div><Link href="/products" className="button-primary">{t("explore")} <ArrowRight size={16} /></Link></div><div className="sale-bubbles">✳　✦</div></div></section>

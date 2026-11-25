@@ -5,6 +5,7 @@ import { SiteHeader } from "@/components/site-header";
 import { SiteFooter } from "@/components/site-footer";
 import { SiteBottomNav } from "@/components/site-bottom-nav";
 import { AnnouncementBar } from "@/components/announcement-bar";
+import { SiteMotion } from "@/components/site-motion";
 
 export const metadata: Metadata = {
   title: { default: "Luxora Global Trade | Premium Quality Products", template: "%s | Luxora Global Trade" },
@@ -33,7 +34,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         />
       </head>
       <body className="min-h-screen flex flex-col antialiased">
-        <StoreProvider><AnnouncementBar /><SiteHeader /><main className="site-content">{children}</main><SiteFooter /><SiteBottomNav /></StoreProvider>
+        <StoreProvider><AnnouncementBar /><SiteHeader /><SiteMotion>{children}</SiteMotion><SiteFooter /><SiteBottomNav /></StoreProvider>
       </body>
     </html>
   );

@@ -7,21 +7,24 @@ import { Home } from "lucide-react";
 import { uploadToCloudinary } from "@/lib/cloudinary-client";
 import { productUnits, quantityStep, unitLabel, type ProductUnit } from "@/lib/product-units";
 import { categoryProductPreset } from "@/lib/category-product-options";
+import { VARIANT_TEMPLATE_KEYS, variantTemplateForKey, resolveVariantTemplate } from "@/lib/variant-templates";
 import { ProductEditor } from "@/components/product-editor";
 import { DeliveryStaffManager } from "@/components/delivery-staff-manager";
 import { AdminTradeRequests } from "@/components/admin-trade-requests";
+import { VendorPermissionsManager } from "@/components/vendor-permissions-manager";
 
 type UserInfo = { id: string; name: string; email: string; role: string; permissions: string[] };
 type Item = Record<string, unknown> & {
   _id: string; status?: string; title?: { en?: string; bn?: string }; name?: { en?: string; bn?: string };
-  description?: { en?: string; bn?: string }; subtitle?: { en?: string; bn?: string };
+  description?: { en?: string; bn?: string }; productDetails?: string; subtitle?: { en?: string; bn?: string };
   slug?: string; price?: number; discountPrice?: number; stock?: number; featured?: boolean; active?: boolean;
-  image?: string; link?: string; order?: number; vendor?: string | { _id: string };
-  category?: string | { _id: string; name?: { en?: string } }; images?: string[]; total?: number;
+  image?: string; link?: string; order?: number; vendor?: string | { _id: string; name?: string; shopName?: string };
+  category?: string | { _id: string; name?: { en?: string; bn?: string } }; images?: string[]; total?: number;
   approved?: boolean; customerInfo?: { name?: string; phone?: string; address?: string; notes?: string; division?: string; district?: string; upazila?: string; union?: string; area?: string };
-  customerName?: string; message?: string; adminReply?: string; createdAt?: string; repliedAt?: string;
+  createdByName?: string; createdByRole?: string; deletedByName?: string; deletedByRole?: string; deletedAt?: string; deletedActive?: boolean;
+  customerName?: string; message?: string; rating?: number; adminReply?: string; createdAt?: string; repliedAt?: string;
   product?: string | { _id?: string; slug?: string; title?: { en?: string; bn?: string } };
-  unit?: string; variants?: { _id?: string; label: string; price: number; stock: number }[];
+  unit?: string; variants?: { _id?: string; label: string; colorHex?: string; price: number; stock: number }[];
   items?: { _id?: string; productId?: string; variantId?: string; vendorId?: string; title: string; variantLabel?: string; unit?: string; unitPrice?: number; quantity: number; status: string }[];
   delivery?: {
     verificationStatus?: string; deliveredAt?: string; deliveredBy?: string; notes?: string;
@@ -40,11 +43,28 @@ type Item = Record<string, unknown> & {
   deliveryAuditValid?: boolean;
   deliveryAuditProtection?: "signed" | "hash-only";
 };
-type Category = { _id: string; name: { en: string; bn: string }; slug: string };
+type CategoryAttributeDefinition = {
+  key: string;
+  name: { en: string; bn?: string };
+  type: "text" | "number" | "select" | "multiselect" | "boolean" | "colour";
+  options?: { value: string; name: { en: string; bn?: string }; hex?: string }[];
+  required?: boolean;
+  displayOrder?: number;
+  active?: boolean;
+};
+type Category = { _id: string; name: { en: string; bn: string }; slug: string; image?: string; variantTemplate?: string; parentCategory?: string | null; active?: boolean; archived?: boolean; order?: number; attributeDefinitions?: CategoryAttributeDefinition[] };
 type VendorOption = { id: string; name: string; email: string };
+type VendorProductAccess = {
+  productAddEnabled: boolean;
+  allowedCategoryIds: string[];
+  deniedCategoryIds: string[];
+  maxProducts: number;
+  requireApproval: boolean;
+  productCount: number;
+};
 type DeliveryStaffOption = { id: string; name: string; role: string };
 type DeliveryAssigneeOption = { id: string; name: string; employeeId: string };
-type ProductVariantDraft = { label: string; price: string; stock: string };
+type ProductVariantDraft = { label: string; colorHex?: string; price: string; stock: string; sku?: string; availability?: "in_stock" | "out_of_stock" | "preorder"; images?: string[]; attributeValues?: Record<string, string | number | boolean | string[]> };
 const permissionOptions = [
   ["manage_categories", "Categories"], ["manage_banners", "Banners"], ["manage_products", "Products"],
   ["manage_featured", "Featured products"], ["manage_offers", "Offers"], ["manage_announcements", "Announcements"], ["view_bookings", "View bookings"], ["manage_bookings", "Manage bookings"],
@@ -93,13 +113,23 @@ function isRecord(value: unknown): value is Json {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
 export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
   const [user, setUser] = useState<UserInfo | null>(null);
   const [tab, setTab] = useState("Overview");
+  const [workspaceSearch, setWorkspaceSearch] = useState("");
   const [items, setItems] = useState<Item[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [vendors, setVendors] = useState<VendorOption[]>([]);
+  const [vendorProductAccess, setVendorProductAccess] = useState<VendorProductAccess | null>(null);
   const [counts, setCounts] = useState<Record<string, number>>({});
+  const [productRecyclePage, setProductRecyclePage] = useState(1);
+  const [productRecyclePages, setProductRecyclePages] = useState(1);
+  const [productRecycleTotal, setProductRecycleTotal] = useState(0);
+  const [selectedDeletedProducts, setSelectedDeletedProducts] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -107,6 +137,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
   const [image, setImage] = useState("");
   const [images, setImages] = useState<string[]>([]);
   const [productVariants, setProductVariants] = useState<ProductVariantDraft[]>([]);
+  const [productAttributeValues, setProductAttributeValues] = useState<Record<string, string | number | boolean | string[]>>({});
   const [productUnit, setProductUnit] = useState<ProductUnit>("piece");
   const [selectedProductCategory, setSelectedProductCategory] = useState("");
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
@@ -135,19 +166,23 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     if (!user) return [];
     if (user.role === "vendor") return ["Overview", "My products", "My bookings", "Password", "Profile"];
     const choices: [string, string][] = [
-      ["Categories", "manage_categories"], ["Banners", "manage_banners"], ["Products", "manage_products"], ["Product comments", "manage_products"],
+      ["Categories", "manage_categories"], ["Banners", "manage_banners"], ["Products", "manage_products"], ["Product Recycle Bin", "manage_products"], ["Product reviews", "manage_products"],
       ["Featured products", "manage_featured"], ["Offers", "manage_offers"], ["Announcements", "manage_announcements"], ["Stock movements", "manage_products"],
       ["Shipping & Payment", "manage_bookings"], ["bKash payments", "manage_bookings"],
       ["Customer Orders", "view_bookings"], ["Reseller Orders", "manage_vendors"], ["Wholesaler Orders", "manage_vendors"],
       ["Delivery staff", "manage_delivery_staff"], ["Vendor applications", "manage_vendors"], ["Reseller Applications", "manage_vendors"], ["Wholesaler Applications", "manage_vendors"],
       ["Messages", "view_messages"],
     ];
-    return ["Overview", ...choices.filter(([, permission]) => can(permission)).map(([label]) => label), ...(user.role === "super_admin" ? ["Admin users", "Coin & Reward Settings", "Rewards & Vouchers Monitor"] : []), "Password", "Profile"];
+    return ["Overview", ...choices.filter(([, permission]) => can(permission)).map(([label]) => label), ...(user.role === "super_admin" ? ["Approved Vendors", "Admin users", "Coin & Reward Settings", "Rewards & Vouchers Monitor"] : []), "Password", "Profile"];
   }, [user, can]);
+  const filteredMenu = useMemo(() => {
+    const query = workspaceSearch.trim().toLocaleLowerCase();
+    return query ? menu.filter((item) => item.toLocaleLowerCase().includes(query)) : menu;
+  }, [menu, workspaceSearch]);
 
   const load = useCallback(async (target: string) => {
     setError(""); setNotice("");
-    const cached = itemsCache.current.get(target);
+    const cached = target === "Product Recycle Bin" ? undefined : itemsCache.current.get(target);
     if (cached) { setItems(cached); setLoading(false); } else { setLoading(true); }
     try {
       if (target === "Overview") {
@@ -167,6 +202,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       }
       if (target === "Profile") { setItems([]); return; }
       if (target === "Password") { setItems([]); return; }
+      if (target === "Approved Vendors") { setItems([]); return; }
       if (target === "Categories") {
         const response = await fetchDashboard("/api/categories?all=true");
         const data = await readJson(response, "categories");
@@ -176,29 +212,71 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       }
       const endpoints: Record<string, string> = {
         Banners: "/api/banners?all=true", Products: "/api/products?all=true&limit=100",
+        "Product Recycle Bin": `/api/products/recycle-bin?page=${productRecyclePage}&limit=50`,
         "My products": "/api/products?all=true&limit=100", "Featured products": "/api/products?all=true&limit=100",
         Offers: "/api/offers?all=true", Announcements: "/api/announcements?all=true", Bookings: "/api/orders", "Customer Orders": "/api/orders", "My bookings": "/api/orders",
         "Vendor applications": "/api/vendor-applications", "Reseller & Wholesaler applications": "/api/vendor-applications", "Reseller Applications": "/api/vendor-applications", "Wholesaler Applications": "/api/vendor-applications",
         Messages: "/api/contact", "Admin users": "/api/admin/users",
         "Delivery staff": "/api/admin/delivery-staff/accounts",
-        "Product comments": "/api/admin/product-comments",
+        "Product reviews": "/api/admin/product-comments",
       };
       const response = await fetchDashboard(endpoints[target] ?? "");
-      const _safeText_data = await response.text(); let data: { items?: Item[]; error?: string } = {};
+      const _safeText_data = await response.text(); let data: { items?: Item[]; error?: string; total?: number; pages?: number } = {};
       try { data = _safeText_data ? JSON.parse(_safeText_data) : {}; } catch { data = { error: _safeText_data?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok) throw new Error(data.error || "Could not load this section");
-      itemsCache.current.set(target, data.items ?? []);
+      if (target === "Product Recycle Bin") {
+        const pages = Math.max(1, data.pages ?? 1);
+        setProductRecycleTotal(data.total ?? 0);
+        setProductRecyclePages(pages);
+        if (productRecyclePage > pages) {
+          setProductRecyclePage(pages);
+          return;
+        }
+      } else {
+        itemsCache.current.set(target, data.items ?? []);
+      }
       setItems(data.items ?? []);
       if (target === "Products" || target === "My products") {
-        const [categoriesResponse, vendorsResponse] = await Promise.all([fetchDashboard("/api/categories"), fetchDashboard("/api/admin/vendors")]);
-        try { if (categoriesResponse.ok) { const ct = await categoriesResponse.text(); setCategories((ct ? JSON.parse(ct) : {}).items ?? []); } } catch {}
-        try { if (vendorsResponse && vendorsResponse.ok) { const vt = await vendorsResponse.text(); setVendors((vt ? JSON.parse(vt) : {}).items ?? []); } } catch {}
+        if (kind === "vendor") {
+          const permissionResponse = await fetchDashboard("/api/vendor/product-permissions");
+          const permissionData = await readJson(permissionResponse, "vendor product permissions");
+          const permissions = permissionData.permissions;
+          if (!permissionResponse.ok) throw new Error(errorText(permissionData) || "Could not load vendor product permissions");
+          if (
+            !isRecord(permissions)
+            || typeof permissions.productAddEnabled !== "boolean"
+            || !isStringArray(permissions.allowedCategoryIds)
+            || !isStringArray(permissions.deniedCategoryIds)
+            || typeof permissions.maxProducts !== "number"
+            || typeof permissions.requireApproval !== "boolean"
+            || typeof permissionData.productCount !== "number"
+            || !Array.isArray(permissionData.categories)
+          ) throw new Error("Vendor product permissions response is invalid");
+          const allowedCategoryIds = permissions.allowedCategoryIds;
+          const deniedCategoryIds = permissions.deniedCategoryIds;
+          setCategories(permissionData.categories as Category[]);
+          setVendorProductAccess({
+            productAddEnabled: permissions.productAddEnabled,
+            allowedCategoryIds,
+            deniedCategoryIds,
+            maxProducts: permissions.maxProducts,
+            requireApproval: permissions.requireApproval,
+            productCount: permissionData.productCount,
+          });
+          setSelectedProductCategory((current) => permissions.productAddEnabled
+            && allowedCategoryIds.includes(current)
+            && !deniedCategoryIds.includes(current) ? current : "");
+        } else {
+          const [categoriesResponse, vendorsResponse] = await Promise.all([fetchDashboard("/api/categories?all=true"), fetchDashboard("/api/admin/vendors")]);
+          try { if (categoriesResponse.ok) { const ct = await categoriesResponse.text(); setCategories((ct ? JSON.parse(ct) : {}).items ?? []); } } catch {}
+          try { if (vendorsResponse.ok) { const vt = await vendorsResponse.text(); setVendors((vt ? JSON.parse(vt) : {}).items ?? []); } } catch {}
+        }
       }
     } catch (reason) {
       setItems([]);
       setError(reason instanceof Error ? reason.message : "Could not load this section");
     } finally { setLoading(false); }
-  }, [kind]);
+  }, [kind, productRecyclePage]);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -249,26 +327,47 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       if (tab === "Categories") {
         endpoint = "/api/categories";
         const parentCategory = String(form.get("parentCategory") ?? "").trim();
+        const attributeDefinitionsText = String(form.get("attributeDefinitions") ?? "").trim();
+        let attributeDefinitions: Record<string, unknown>[] | undefined;
+        if (attributeDefinitionsText) {
+          try {
+            const parsedAttributes = JSON.parse(attributeDefinitionsText) as unknown;
+            if (!Array.isArray(parsedAttributes)) throw new Error("Attribute definitions must be a JSON array.");
+            attributeDefinitions = parsedAttributes as Record<string, unknown>[];
+          } catch (reason) {
+            throw new Error(reason instanceof Error ? reason.message : "Invalid attribute definitions JSON.");
+          }
+        }
         body = {
           name: text("name"),
           image,
           parentCategory: parentCategory || undefined,
+          variantTemplate: String(form.get("variantTemplate") ?? ""),
           isFeatured: form.get("isFeatured") === "on",
           active: form.get("active") === "on",
           order: Number(form.get("order") || 0),
+          ...(attributeDefinitions ? { attributeDefinitions } : {}),
         };
       } else if (tab === "Banners") {
         if (!image) throw new Error("Upload a banner image before adding the banner.");
         endpoint = "/api/banners";
         const buttonText = text("buttonText");
         const bgColor = String(form.get("bgColor") ?? "").trim();
+        const enteredLink = String(form.get("link") ?? "").trim();
+        let link = enteredLink;
+        if (enteredLink.startsWith("http://")) {
+          const parsedLink = new URL(enteredLink);
+          if (parsedLink.origin === window.location.origin) {
+            link = `${parsedLink.pathname}${parsedLink.search}${parsedLink.hash}`;
+          }
+        }
         body = {
           title: text("title"),
           subtitle: text("subtitle"),
           buttonText: buttonText.en ? buttonText : undefined,
           bgColor: bgColor || undefined,
           image,
-          link: String(form.get("link") ?? "").trim(),
+          link,
           order: Number(form.get("order") || 0),
           active: form.get("active") === "on",
           startDate: String(form.get("startDate") ?? "").trim() || undefined,
@@ -277,21 +376,28 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
       } else if (tab === "Products" || tab === "My products") {
         endpoint = "/api/products";
         const unit = productUnit;
-        const variants = productVariants.map((variant) => ({ label: variant.label.trim(), price: Number(variant.price), stock: Number(variant.stock) }));
+        const variants = productVariants.map((variant) => ({
+          label: variant.label.trim(),
+          ...(variant.colorHex ? { colorHex: variant.colorHex.toUpperCase() } : {}),
+          price: Number(variant.price),
+          stock: Number(variant.stock),
+          sku: variant.sku?.trim() || undefined,
+          availability: variant.stock === "0" ? "out_of_stock" : variant.availability ?? "in_stock",
+          images: variant.images ?? [],
+          attributeValues: variant.attributeValues ?? {},
+        }));
         const hasVariants = variants.length > 0;
         const prices = variants.map((variant) => variant.price);
         const stocks = variants.map((variant) => variant.stock);
         body = {
           title: text("title"), description: text("description"),
+          productDetails: String(form.get("productDetails") ?? "").trim(),
           price: hasVariants ? Math.min(...prices) : Number(form.get("price")),
           ...(!hasVariants && form.get("discountPrice") ? { discountPrice: Number(form.get("discountPrice")) } : {}),
           stock: hasVariants ? stocks.reduce((total, stock) => total + stock, 0) : Number(form.get("stock")),
           unit, variants, category: form.get("category"), images,
-          vendor: form.get("vendor") || undefined, active: form.get("active") === "on", featured: form.get("featured") === "on",
-          ...(String(form.get("resellerPrice") || "").trim() ? { resellerPrice: Number(form.get("resellerPrice")) } : {}),
-          ...(String(form.get("wholesalerPrice") || "").trim() ? { wholesalerPrice: Number(form.get("wholesalerPrice")) } : {}),
-          ...(String(form.get("resellerMoq") || "").trim() ? { resellerMoq: Number(form.get("resellerMoq")) } : {}),
-          ...(String(form.get("wholesalerMoq") || "").trim() ? { wholesalerMoq: Number(form.get("wholesalerMoq")) } : {}),
+          attributeValues: productAttributeValues,
+          vendor: form.get("vendor") || undefined, active: user?.role === "vendor" || form.get("active") === "on", featured: form.get("featured") === "on",
         };
       } else if (tab === "Admin users") {
         endpoint = "/api/admin/users";
@@ -319,7 +425,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
           ...(details?.formErrors ?? []),
         ];
         throw new Error(validationErrors.length
-          ? `${result.error || "Could not save"} â€” ${validationErrors.join("; ")}`
+          ? `${result.error || "Could not save"} — ${validationErrors.join("; ")}`
           : result.error || "Could not save");
       }
       const savedItem = (result as { item?: Item }).item;
@@ -374,11 +480,15 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     setError(""); setNotice("");
     try {
       const response = await fetch(url, { method, ...(body ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {}) });
-      const _safeText_result = await response.text(); let result: { error?: string; temporaryPassword?: string } = {};
+      const _safeText_result = await response.text(); let result: { error?: string; temporaryPassword?: string; keptInactive?: string[] } = {};
       try { result = _safeText_result ? JSON.parse(_safeText_result) : {}; } catch { result = { error: _safeText_result?.startsWith("<") ? "Server returned an invalid response." : "Invalid server response" }; }
       if (!response.ok) throw new Error(result.error || "Could not update");
       await load(tab);
-      setNotice(result.temporaryPassword ? `Vendor approved. Share this temporary password securely: ${result.temporaryPassword}` : "Updated successfully.");
+      setNotice(result.temporaryPassword
+        ? `Vendor approved. Share this temporary password securely: ${result.temporaryPassword}`
+        : result.keptInactive?.length
+          ? `${result.keptInactive.length} product(s) restored as inactive because the vendor account is not active.`
+          : "Updated successfully.");
       return null;
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : "Could not update";
@@ -387,25 +497,55 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     }
   }
 
+  async function restoreDeletedProducts(ids: string[]) {
+    const failure = await update("/api/products/recycle-bin", "POST", { ids });
+    setSelectedDeletedProducts([]);
+    if (failure) {
+      await load(tab);
+      setError(failure);
+    }
+  }
+
+  async function permanentlyDeleteProduct(id: string) {
+    if (!window.confirm("Permanently delete this product? A verified database backup will be kept. Order snapshots and uploaded images will not be deleted.")) return;
+    await update(`/api/products/recycle-bin/${id}`, "DELETE", { confirmation: "permanently-delete" });
+  }
+
   function selectProductCategory(categoryId: string) {
     setSelectedProductCategory(categoryId);
+    setProductAttributeValues({});
     const category = categories.find((item) => item._id === categoryId);
-    const preset = categoryProductPreset(category);
-    if (!preset) return;
-    const msg = `Apply category preset? Unit: ${unitLabel(preset.unit)}${preset.options.length ? `, suggested options: ${preset.options.join(", ")}` : ""}. You can still change the unit/options.`;
+    if (!category) return;
+    const unitPreset = categoryProductPreset(category);
+    const resolvedTemplate = resolveVariantTemplate({ categoryTemplate: category.variantTemplate, categoryName: category.name.en });
+    const template = variantTemplateForKey(category.variantTemplate || resolvedTemplate.template.key);
+    const options = template.key === "standard_default" ? unitPreset?.options ?? [] : template.presets;
+    if (!unitPreset && options.length === 0) return;
+    const msg = `Apply category preset?${unitPreset ? ` Unit: ${unitLabel(unitPreset.unit)}.` : ""}${options.length ? ` ${template.label}: ${options.join(", ")}.` : ""} You can still change the unit/options.`;
     if (typeof window !== "undefined" && !window.confirm(msg)) return;
-    setProductUnit(preset.unit);
-    if (preset.options.length) {
-      setProductVariants((current) => preset.options.map((label) => {
+    if (unitPreset) setProductUnit(unitPreset.unit);
+    if (options.length) {
+      setProductVariants((current) => options.map((label) => {
         const existing = current.find((variant) => variant.label.trim().toLowerCase() === label.toLowerCase());
         return existing ?? { label, price: "", stock: "" };
       }));
     }
   }
 
+  const vendorProductCategories = useMemo(() => {
+    if (kind !== "vendor" || !vendorProductAccess?.productAddEnabled) return kind === "vendor" ? [] : categories;
+    const allowed = new Set(vendorProductAccess.allowedCategoryIds);
+    const denied = new Set(vendorProductAccess.deniedCategoryIds);
+    return categories.filter((category) => allowed.has(category._id) && !denied.has(category._id));
+  }, [categories, kind, vendorProductAccess]);
+  const vendorProductLimitReached = kind === "vendor"
+    && Boolean(vendorProductAccess && vendorProductAccess.productCount >= vendorProductAccess.maxProducts);
+  const canAddVendorProduct = kind !== "vendor"
+    || Boolean(vendorProductAccess?.productAddEnabled && vendorProductCategories.length > 0 && !vendorProductLimitReached);
+
   const title = kind === "admin" ? "Store administration" : "Vendor studio";
   if (!user) {
-    if (loading) return <div className="page-shell">Loading dashboardâ€¦</div>;
+    if (loading) return <div className="page-shell">Loading dashboard…</div>;
     return <div className="page-shell"><p className="form-error" role="alert">{error || "Could not verify access."}</p><button className="button-secondary" onClick={() => window.location.reload()}>Try again</button></div>;
   }
   return <div className="page-shell dashboard-page">
@@ -426,7 +566,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
             }
           }}
           className="button-secondary"
-          style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 13, cursor: "pointer" }}
+          style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, cursor: "pointer" }}
         >
           <Home size={15} /> Storefront Home
         </button>
@@ -436,15 +576,32 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
     <div className="dashboard-layout">
       <aside className="dashboard-nav">
         <p className="dashboard-nav-label">WORKSPACE</p>
-        {menu.map((item) => <button type="button" key={item} className={tab === item ? "selected" : ""} onClick={() => setTab(item)}>{item}</button>)}
+        <form className="dashboard-nav-search" role="search" onSubmit={(event) => {
+          event.preventDefault();
+          if (filteredMenu.length) {
+            setTab(filteredMenu[0]);
+            setWorkspaceSearch("");
+          }
+        }}>
+          <input
+            type="search"
+            aria-label="Search workspace pages"
+            placeholder="Search pages..."
+            value={workspaceSearch}
+            onChange={(event) => setWorkspaceSearch(event.target.value)}
+          />
+        </form>
+        {filteredMenu.map((item) => <button type="button" key={item} className={tab === item ? "selected" : ""} onClick={() => { setTab(item); setWorkspaceSearch(""); }}>{item}</button>)}
+        {filteredMenu.length === 0 && <p className="dashboard-nav-empty">No matching pages</p>}
         <button type="button" className="dashboard-signout" onClick={async () => { const response = await fetch("/api/auth/logout", { method: "POST" }); if (!response.ok) { setError("Could not sign out. Please try again."); return; } window.dispatchEvent(new Event("eshop:auth-changed")); router.replace("/account"); }}>Sign out</button>
       </aside>
       <section className="dashboard-card">
         <div className="dashboard-card-heading"><div><p>MANAGE YOUR STORE</p><h2>{tab}</h2></div></div>
         {error && <p className="form-error">{error}</p>}{notice && <p className="form-success">{notice}</p>}
-        {loading ? <p className="subtle">Loadingâ€¦</p> : tab === "Overview" ? <div className="stat-grid">{Object.entries(counts).map(([key, value]) => <div className="stat-card" key={key}><span>{key.replace(/[A-Z]/g, (letter) => ` ${letter}`).replace(/^./, (letter) => letter.toUpperCase())}</span><strong>{value}</strong></div>)}</div>
+        {loading ? <p className="subtle">Loading…</p> : tab === "Overview" ? <div className="stat-grid">{Object.entries(counts).map(([key, value]) => <div className="stat-card" key={key}><span>{key.replace(/[A-Z]/g, (letter) => ` ${letter}`).replace(/^./, (letter) => letter.toUpperCase())}</span><strong>{value}</strong></div>)}</div>
           : tab === "Profile" ? user?.role === "vendor" ? <VendorProfile /> : <div><p><strong>{user?.name}</strong></p><p>{user?.email}</p><p className="subtle">Role: {user?.role}</p></div>
           : tab === "Password" ? <ChangePasswordPanel />
+          : tab === "Approved Vendors" && user.role === "super_admin" ? <VendorPermissionsManager />
           : tab === "Coin & Reward Settings" ? <CoinRewardSettingsPanel />
           : tab === "Rewards & Vouchers Monitor" ? <RewardsVouchersMonitor />
           : tab === "Stock movements" ? <StockMovementsMonitor />
@@ -453,21 +610,35 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
           : tab === "Wholesale & Reseller Orders" ? <AdminTradeRequests />
           : tab === "Reseller Orders" ? <AdminTradeRequests roleFilter="reseller" />
           : tab === "Wholesaler Orders" ? <AdminTradeRequests roleFilter="wholesaler" />
+          : tab === "Product Recycle Bin" ? <ProductRecoveryBin
+            items={items}
+            page={productRecyclePage}
+            pages={productRecyclePages}
+            total={productRecycleTotal}
+            selectedIds={selectedDeletedProducts}
+            canPermanentlyDelete={user.role === "super_admin"}
+            onSelectionChange={setSelectedDeletedProducts}
+            onPageChange={(page) => { setSelectedDeletedProducts([]); setProductRecyclePage(page); }}
+            onRestore={(ids) => { void restoreDeletedProducts(ids); }}
+            onPermanentlyDelete={(id) => { void permanentlyDeleteProduct(id); }}
+          />
           : <>
             {["Categories", "Banners", "Products", "My products", "Admin users"].includes(tab) && <form className="admin-form" onSubmit={submitForm}>
-              {tab === "Categories" && <>
-                <div className="field"><label>Category name (English)</label><input name="nameEn" required maxLength={200} /></div><div className="field"><label>Category name (à¦¬à¦¾à¦‚à¦²à¦¾)</label><input name="nameBn" maxLength={200} /></div>
+              {tab === "Categories" && <span className="category-actions">
+                <div className="field"><label>Category name (English)</label><input name="nameEn" required maxLength={200} /></div><div className="field"><label>Category name (বাংলা)</label><input name="nameBn" maxLength={200} /></div>
                 <div className="field"><label>Parent category (optional, for sub-category)</label><select name="parentCategory" defaultValue=""><option value="">None</option>{categories.map((category) => <option key={category._id} value={category._id}>{category.name?.en || category.name?.bn || category._id}</option>)}</select></div>
+                <div className="field"><label>Default product options</label><select name="variantTemplate" defaultValue=""><option value="">Detect from category name</option>{VARIANT_TEMPLATE_KEYS.filter((key) => key !== "standard_default").map((key) => <option key={key} value={key}>{variantTemplateForKey(key).label}</option>)}</select><small className="subtle">These suggested options appear when this category is selected for a new product.</small></div>
                 <div className="field"><label>Order / Priority</label><input name="order" type="number" defaultValue={0} /></div>
+                <div className="field wide"><label>Dynamic attribute definitions (JSON)</label><textarea name="attributeDefinitions" rows={8} placeholder="Enter a JSON array of attribute definitions" /><small className="subtle">Types: text, number, select, multiselect, boolean, colour. Select/colour options use an options array.</small></div>
                 <div className="field wide"><label>Category image / icon</label><input type="file" accept="image/*" onChange={(event) => uploadFile(event)} />{image && <small className="subtle">Image uploaded</small>}</div>
                 <label className="admin-check"><input type="checkbox" name="isFeatured" /> Show in homepage category strip (Featured)</label>
                 <label className="admin-check"><input type="checkbox" name="active" defaultChecked /> Active</label>
-              </>}
+              </span>}
               {tab === "Banners" && <>
-                <div className="field"><label>Title (English)</label><input name="titleEn" required maxLength={500} /></div><div className="field"><label>Title (à¦¬à¦¾à¦‚à¦²à¦¾)</label><input name="titleBn" maxLength={500} /></div>
-                <div className="field"><label>Subtitle (English)</label><input name="subtitleEn" required maxLength={500} /></div><div className="field"><label>Subtitle (à¦¬à¦¾à¦‚à¦²à¦¾)</label><input name="subtitleBn" maxLength={500} /></div>
-                <div className="field"><label>Shop Now button text (English, optional)</label><input name="buttonTextEn" maxLength={120} placeholder="Shop Now" /></div><div className="field"><label>Shop Now button text (à¦¬à¦¾à¦‚à¦²à¦¾, optional)</label><input name="buttonTextBn" maxLength={120} /></div>
-                <div className="field"><label>Background color (optional)</label><input name="bgColor" defaultValue="" maxLength={120} placeholder="#020617, CSS color, or gradient" /></div><div className="field"><label>Destination link (optional)</label><input name="link" defaultValue="" placeholder="Leave blank for no redirect" maxLength={500} /></div>
+                <div className="field"><label>Title (English)</label><input name="titleEn" required maxLength={500} /></div><div className="field"><label>Title (বাংলা)</label><input name="titleBn" maxLength={500} /></div>
+                <div className="field"><label>Subtitle (English)</label><input name="subtitleEn" required maxLength={500} /></div><div className="field"><label>Subtitle (বাংলা)</label><input name="subtitleBn" maxLength={500} /></div>
+                <div className="field"><label>Shop Now button text (English, optional)</label><input name="buttonTextEn" maxLength={120} placeholder="Shop Now" /></div><div className="field"><label>Shop Now button text (বাংলা, optional)</label><input name="buttonTextBn" maxLength={120} /></div>
+                <div className="field"><label>Background color (optional)</label><input name="bgColor" defaultValue="" maxLength={120} placeholder="#020617, CSS color, or gradient" /></div><div className="field"><label>Destination link (optional)</label><input name="link" defaultValue="" placeholder="e.g. /products or https://example.com" maxLength={500} /></div>
                 <div className="field"><label>Sort order</label><input name="order" type="number" defaultValue={0} /></div><div className="field"><label>Start date (optional)</label><input name="startDate" type="datetime-local" /></div>
                 <div className="field"><label>End date (optional)</label><input name="endDate" type="datetime-local" /></div><div className="field"></div>
                 <div className="field wide"><label>Banner image</label><input type="file" accept="image/*" onChange={(event) => uploadFile(event)} />{image && <><small className="subtle">Image uploaded</small><div className="product-image-previews"><div className="product-image-preview"><Image src={image} alt="Uploaded banner preview" width={448} height={176} unoptimized /><button type="button" onClick={() => setImage("")}>Remove image</button></div></div></>}</div>
@@ -492,32 +663,58 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
                     const safeImage = image.replace(/"/g, "&quot;");
                     const safeLink = link.replace(/</g, "&lt;");
                     const safeBg = bgColor.replace(/["<>]/g, "");
-                    previewWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Banner Preview</title><style>body{margin:0;font-family:system-ui,sans-serif;background:${safeBg}}.wrap{position:relative;max-width:1200px;margin:0 auto}img{display:block;width:100%;height:auto;max-height:70vh;object-fit:contain;background:${safeBg}}.overlay{position:absolute;inset:0;display:flex;align-items:flex-end;padding:28px;background:linear-gradient(90deg,rgba(2,6,23,.72),rgba(2,6,23,0) 70%);color:#fff}h2{margin:0;font-size:34px}p{margin:8px 0 0;max-width:520px}.btn{display:inline-block;margin-top:14px;padding:12px 18px;border-radius:4px;background:#c5a059;color:#fff;font-weight:700;text-decoration:none}.meta{padding:12px 16px;color:#d7e3ea;font-size:13px;background:#071b2b}</style></head><body><div class="wrap"><img src="${safeImage}" alt="${safeTitle}"/><div class="overlay"><div><h2>${safeTitle}</h2><p>${safeSubtitle}</p>${link ? `<a class="btn" href="#">${safeButton}</a>` : `<span class="btn">${safeButton}</span>`}</div></div></div><div class="meta">Preview only (not published). Background: ${safeBg} Â· Destination: ${safeLink || "none / non-clickable"}</div></body></html>`);
+                    previewWindow.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>Banner Preview</title><style>body{margin:0;font-family:system-ui,sans-serif;background:${safeBg}}.wrap{position:relative;max-width:1200px;margin:0 auto}img{display:block;width:100%;height:auto;max-height:70vh;object-fit:contain;background:${safeBg}}.overlay{position:absolute;inset:0;display:flex;align-items:flex-end;padding:28px;background:linear-gradient(90deg,rgba(2,6,23,.72),rgba(2,6,23,0) 70%);color:#fff}h2{margin:0;font-size:34px}p{margin:8px 0 0;max-width:520px}.btn{display:inline-block;margin-top:14px;padding:12px 18px;border-radius:4px;background:#c5a059;color:#fff;font-weight:700;text-decoration:none}.meta{padding:12px 16px;color:#d7e3ea;font-size:13px;background:#071b2b}</style></head><body><div class="wrap"><img src="${safeImage}" alt="${safeTitle}"/><div class="overlay"><div><h2>${safeTitle}</h2><p>${safeSubtitle}</p>${link ? `<a class="btn" href="#">${safeButton}</a>` : `<span class="btn">${safeButton}</span>`}</div></div></div><div class="meta">Preview only (not published). Background: ${safeBg} · Destination: ${safeLink || "none / non-clickable"}</div></body></html>`);
                     previewWindow.document.close();
                   }}>Preview before publish</button>
                 </div>
               </>}
               {(tab === "Products" || tab === "My products") && <>
-                <div className="field"><label>Product name (English)</label><input name="titleEn" required maxLength={500} /></div><div className="field"><label>Product name (à¦¬à¦¾à¦‚à¦²à¦¾)</label><input name="titleBn" maxLength={500} /></div>
-                <div className="field wide"><label>Description (English)</label><textarea name="descriptionEn" required maxLength={5000} /></div><div className="field wide"><label>Description (à¦¬à¦¾à¦‚à¦²à¦¾)</label><textarea name="descriptionBn" maxLength={5000} /></div>
-                <div className="field"><label>Category</label><select name="category" required value={selectedProductCategory} onChange={(event) => selectProductCategory(event.target.value)}><option value="" disabled>Select a category</option>{categories.map((category) => <option key={category._id} value={category._id}>{category.name.en}</option>)}</select><small className="subtle">Category suggestions fill in standard sizes or packs. Add a matching category in the Categories tab if it is not listed.</small></div>
+                {user?.role === "vendor" && <p className="subtle wide">
+                  {vendorProductAccess?.productAddEnabled
+                    ? `Product permission: ${vendorProductAccess.productCount} / ${vendorProductAccess.maxProducts} products used. ${vendorProductAccess.requireApproval ? "New products require admin approval." : "New products do not require admin approval."}`
+                    : "Product adding is disabled until a Super Admin configures your vendor permissions."}
+                  {vendorProductLimitReached && " Your product limit has been reached."}
+                </p>}
+                <div className="field"><label>Product name (English)</label><input name="titleEn" required maxLength={500} /></div><div className="field"><label>Product name (বাংলা)</label><input name="titleBn" maxLength={500} /></div>
+                <div className="field wide"><label>Description (English)</label><textarea name="descriptionEn" required maxLength={5000} /></div><div className="field wide"><label>Description (বাংলা)</label><textarea name="descriptionBn" maxLength={5000} /></div>
+                <div className="field wide"><label>Product details / specifications (optional)</label><textarea name="productDetails" rows={5} maxLength={3000} placeholder="Add details such as color, size, measurements, material, or brand. These will appear on the product page." /><small className="subtle">Shown to customers on the product page. Use separate lines for clearer formatting.</small></div>
+                <div className="field"><label>Category</label><select name="category" required value={selectedProductCategory} onChange={(event) => selectProductCategory(event.target.value)}><option value="" disabled>{user?.role === "vendor" && vendorProductCategories.length === 0 ? "No permitted categories" : "Select a category"}</option>{vendorProductCategories.map((category) => <option key={category._id} value={category._id}>{category.name.en}</option>)}</select><small className="subtle">{user?.role === "vendor" ? "Only categories approved for your account are available here." : "Category suggestions fill in standard sizes or packs. Add a matching category in the Categories tab if it is not listed."}</small></div>
+                {(categories.find((category) => category._id === selectedProductCategory)?.attributeDefinitions ?? [])
+                  .filter((attribute) => attribute.active !== false)
+                  .sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0))
+                  .map((attribute) => <div className="field" key={attribute.key}>
+                    <label>{attribute.name.en}{attribute.name.bn ? ` / ${attribute.name.bn}` : ""}{attribute.required ? " *" : ""}</label>
+                    {attribute.type === "text" && <input value={String(productAttributeValues[attribute.key] ?? "")} required={attribute.required} maxLength={200} onChange={(event) => setProductAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value }))} />}
+                    {attribute.type === "number" && <input type="number" step="0.01" value={typeof productAttributeValues[attribute.key] === "number" ? String(productAttributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setProductAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value === "" ? "" : Number(event.target.value) }))} />}
+                    {attribute.type === "boolean" && <select value={typeof productAttributeValues[attribute.key] === "boolean" ? String(productAttributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setProductAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value === "true" }))}><option value="" disabled>Select</option><option value="true">Yes</option><option value="false">No</option></select>}
+                    {(attribute.type === "select" || attribute.type === "colour") && <select value={typeof productAttributeValues[attribute.key] === "string" ? String(productAttributeValues[attribute.key]) : ""} required={attribute.required} onChange={(event) => setProductAttributeValues((current) => ({ ...current, [attribute.key]: event.target.value }))}><option value="" disabled>Select</option>{(attribute.options ?? []).map((option) => <option key={option.value} value={option.value}>{option.name?.en || option.name?.bn || option.value}{option.hex ? ` · ${option.hex}` : ""}</option>)}</select>}
+                    {attribute.type === "multiselect" && <div className="attribute-option-grid">{(attribute.options ?? []).map((option) => {
+                      const current = Array.isArray(productAttributeValues[attribute.key]) ? productAttributeValues[attribute.key] as string[] : [];
+                      const checked = current.includes(option.value);
+                      return <label className="admin-check" key={option.value}><input type="checkbox" checked={checked} onChange={(event) => setProductAttributeValues((state) => {
+                        const selected = Array.isArray(state[attribute.key]) ? state[attribute.key] as string[] : [];
+                        return { ...state, [attribute.key]: event.target.checked ? [...selected, option.value] : selected.filter((value) => value !== option.value) };
+                      })} />{option.name?.en || option.name?.bn || option.value}</label>;
+                    })}</div>}
+                  </div>)}
                 <div className="field"><label>{productVariants.length ? "Stock counted in" : "Selling unit"}</label><select name="unit" value={productUnit} disabled={productVariants.length > 0} onChange={(event) => setProductUnit(event.target.value as ProductUnit)}>{productUnits.map((unit) => <option key={unit} value={unit}>{unitLabel(unit)}</option>)}</select></div>
                 {productVariants.length === 0 ? <>
-                  <div className="wide unit-options-toggle"><span>Need sizes or pack options? Add size / volume options with separate prices and stock.</span><button type="button" className="button-secondary" onClick={() => setProductVariants([{ label: "", price: "", stock: "" }])}>Add size / volume options</button></div>
-                  <div className="field"><label>Regular price per {unitLabel(productUnit)} (à§³)</label><input name="price" type="number" min="0" step="0.01" required /></div><div className="field"><label>Sale price per {unitLabel(productUnit)} (à§³, optional)</label><input name="discountPrice" type="number" min="0" step="0.01" /></div>
-                  <div className="field"><label>Reseller price per {unitLabel(productUnit)} (à§³, optional)</label><input name="resellerPrice" type="number" min="0" step="0.01" /></div><div className="field"><label>Reseller MOQ ({unitLabel(productUnit)})</label><input name="resellerMoq" type="number" min="0.01" step={quantityStep(productUnit)} defaultValue="1" /></div>
-                  <div className="field"><label>Wholesaler price per {unitLabel(productUnit)} (à§³, optional)</label><input name="wholesalerPrice" type="number" min="0" step="0.01" /></div><div className="field"><label>Wholesaler MOQ ({unitLabel(productUnit)})</label><input name="wholesalerMoq" type="number" min="0.01" step={quantityStep(productUnit)} defaultValue="1" /></div>
+                  <div className="wide unit-options-toggle"><span>Add color variants or size / volume options with separate prices and stock.</span><div className="product-editor-option-actions"><button type="button" className="button-secondary" onClick={() => setProductVariants([{ label: "", price: "", stock: "" }])}>Add size / volume options</button><button type="button" className="button-secondary" onClick={() => setProductVariants([{ label: "", colorHex: "#000000", price: "", stock: "" }])}>Add color variant</button></div></div>
+                  <div className="field"><label>Regular price per {unitLabel(productUnit)} (৳)</label><input name="price" type="number" min="0" step="0.01" required /></div><div className="field"><label>Sale price per {unitLabel(productUnit)} (৳, optional)</label><input name="discountPrice" type="number" min="0" step="0.01" /></div>
                   <div className="field"><label>Stock ({unitLabel(productUnit)})</label><input name="stock" type="number" min="0" step={quantityStep(productUnit)} required /></div>
                 </> : <div className="wide product-variants-field">
-                  <div className="product-variants-heading"><div><strong>Size / volume options</strong><small>Set a separate price and available stock for each option. The selected category filled in suggested options.</small></div><button type="button" className="button-secondary" onClick={() => setProductVariants((current) => [...current, { label: "", price: "", stock: "" }])}>Add option</button></div>
+                  <div className="product-variants-heading"><div><strong>Product variants</strong><small>Set each color, size or pack as a selectable variant with its own price and stock.</small></div><div className="product-editor-option-actions"><button type="button" className="button-secondary" disabled={productVariants.length >= 30} onClick={() => setProductVariants((current) => [...current, { label: "", price: "", stock: "" }])}>Add option</button><button type="button" className="button-secondary" disabled={productVariants.length >= 30} onClick={() => setProductVariants((current) => [...current, { label: "", colorHex: "#000000", price: "", stock: "" }])}>Add color variant</button></div></div>
                   {productVariants.map((variant, index) => <div className="product-variant-row" key={index}>
-                    <div className="field"><label>Size / option</label><input value={variant.label} required maxLength={60} placeholder="e.g. XL or 50 ml" onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} /></div>
-                    <div className="field"><label>Price per option (à§³)</label><input type="number" min="0" step="0.01" value={variant.price} required onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, price: event.target.value } : item))} /></div>
+                    <div className="field"><label>{variant.colorHex ? "Color name" : "Size / option"}</label><input value={variant.label} required maxLength={60} placeholder={variant.colorHex ? "e.g. Midnight Blue" : "e.g. XL or 50 ml"} onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, label: event.target.value } : item))} /></div>
+                    {variant.colorHex && <div className="field"><label>Color</label><input type="color" value={variant.colorHex} onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, colorHex: event.target.value.toUpperCase() } : item))} /></div>}
+                    <div className="field"><label>Price per option (৳)</label><input type="number" min="0" step="0.01" value={variant.price} required onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, price: event.target.value } : item))} /></div>
                     <div className="field"><label>Available stock ({unitLabel(productUnit)})</label><input type="number" min="0" step={quantityStep(productUnit)} value={variant.stock} required onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, stock: event.target.value } : item))} /></div>
+                    <div className="field"><label>SKU (optional)</label><input value={variant.sku ?? ""} maxLength={80} placeholder="e.g. SHR-L-RED" onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, sku: event.target.value } : item))} /></div>
+                    <div className="field"><label>Availability</label><select value={variant.availability ?? "in_stock"} onChange={(event) => setProductVariants((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, availability: event.target.value as "in_stock" | "out_of_stock" | "preorder" } : item))}><option value="in_stock">In stock</option><option value="preorder">Preorder</option><option value="out_of_stock">Out of stock</option></select></div>
                     <button type="button" className="remove-variant-button" aria-label={`Remove option ${index + 1}`} onClick={() => setProductVariants((current) => current.filter((_, itemIndex) => itemIndex !== index))}>Remove</button>
                   </div>)}
                 </div>}
-                {user?.role !== "vendor" && <div className="field"><label>Vendor (optional)</label><select name="vendor" defaultValue=""><option value="">Store product</option>{vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} Â· {vendor.email}</option>)}</select></div>}
+                {user?.role !== "vendor" && <div className="field"><label>Vendor (optional)</label><select name="vendor" defaultValue=""><option value="">Store product</option>{vendors.map((vendor) => <option key={vendor.id} value={vendor.id}>{vendor.name} · {vendor.email}</option>)}</select></div>}
                 <div className="field wide"><label>Product images (up to 12)</label><input type="file" accept="image/*" multiple onChange={(event) => uploadFile(event, true)} />{images.length > 0 && <><small className="subtle">{images.length} image(s) uploaded</small><div className="product-image-previews">{images.map((url, index) => <div className="product-image-preview" key={url}><Image src={url} alt={`Uploaded product ${index + 1}`} width={224} height={176} unoptimized /><button type="button" aria-label={`Remove product image ${index + 1}`} onClick={() => setImages((current) => current.filter((_, imageIndex) => imageIndex !== index))}>Remove</button></div>)}</div></>}</div>
                 {user?.role !== "vendor" && <><label className="admin-check"><input type="checkbox" name="active" defaultChecked /> Active</label><label className="admin-check"><input type="checkbox" name="featured" /> Featured</label></>}
               </>}
@@ -529,7 +726,7 @@ export function Dashboard({ kind }: { kind: "admin" | "vendor" }) {
               {tab === "Delivery staff" && <>
                 <p className="subtle" style={{ marginBottom: 12 }}>Professional delivery staff management. Create, view, edit, activate/deactivate/suspend/reactivate accounts and review performance/history from existing order data. Assigned delivery area, invitation tokens, and dedicated COD/complaint reports require DB backup/migration and are pending.</p>
               </>}
-              <button className="button-primary wide" disabled={busy}>{busy ? "Savingâ€¦" : tab === "Admin users" ? "Create sub-admin" : tab === "Delivery staff" ? "Create delivery staff account" : `Add ${tab === "My products" ? "product" : tab.slice(0, -1)}`}</button>
+              <button className="button-primary wide" disabled={busy || (tab === "My products" && user?.role === "vendor" && !canAddVendorProduct)}>{busy ? "Saving…" : tab === "Admin users" ? "Create sub-admin" : tab === "Delivery staff" ? "Create delivery staff account" : `Add ${tab === "My products" ? "product" : tab.slice(0, -1)}`}</button>
             </form>}
             <div className="data-table-wrap"><DataTable tab={tab} items={items} update={update} can={can} categories={categories} vendors={vendors} userRole={user?.role ?? ""} userId={user?.id ?? ""} setError={setError} setNotice={setNotice} showAddForm={showAddForm} setShowAddForm={setShowAddForm} newOffer={newOffer} setNewOffer={setNewOffer} load={load} /></div>
           </>}
@@ -572,7 +769,7 @@ function ChangePasswordPanel() {
     <div className="field"><label htmlFor="current-password">Current password</label><input id="current-password" name="currentPassword" type="password" autoComplete="current-password" required maxLength={128} /></div>
     <div className="field"><label htmlFor="new-password">New password</label><input id="new-password" name="newPassword" type="password" autoComplete="new-password" required minLength={10} maxLength={128} /><small className="subtle">Minimum 10 characters.</small></div>
     <div className="field"><label htmlFor="confirm-password">Confirm new password</label><input id="confirm-password" name="confirmPassword" type="password" autoComplete="new-password" required minLength={10} maxLength={128} /></div>
-    <button className="button-primary" disabled={busy}>{busy ? "Updatingâ€¦" : "Change password"}</button>
+    <button className="button-primary" disabled={busy}>{busy ? "Updating…" : "Change password"}</button>
   </form>;
 }
 
@@ -611,7 +808,7 @@ function VendorProfile() {
     <div className="field"><label>Email</label><input value={profile.email} readOnly /></div>
     <div className="field"><label htmlFor="vendor-phone">Phone</label><input id="vendor-phone" name="phone" value={profile.phone} onChange={(event) => setProfile((current) => ({ ...current, phone: event.target.value }))} required minLength={6} maxLength={30} /></div>
     <div className="field"><label htmlFor="vendor-address">Address</label><textarea id="vendor-address" name="address" value={profile.address} onChange={(event) => setProfile((current) => ({ ...current, address: event.target.value }))} required minLength={5} maxLength={1000} /></div>
-    <button className="button-primary" disabled={busy}>{busy ? "Savingâ€¦" : "Save profile"}</button>
+    <button className="button-primary" disabled={busy}>{busy ? "Saving…" : "Save profile"}</button>
   </form>;
 }
 
@@ -688,34 +885,96 @@ function CoinRewardSettingsPanel() {
     } finally { setSaving(false); }
   }
 
-  if (loading) return <p className="subtle">Loading settingsâ€¦</p>;
+  if (loading) return <p className="subtle">Loading settings…</p>;
   return <form className="admin-form" onSubmit={save} aria-label="Coin and Reward Settings">
     {error && <p className="form-error">{error}</p>}{notice && <p className="form-success">{notice}</p>}
-    <h3 style={{ gridColumn: "1 / -1", margin: "4px 0" }}>Global Toggles (à¦šà¦¾à¦²à§/à¦¬à¦¨à§à¦§)</h3>
+    <h3 style={{ gridColumn: "1 / -1", margin: "4px 0" }}>Global Toggles (চালু/বন্ধ)</h3>
     <label className="admin-check"><input type="checkbox" checked={form.toggles.rewardSystemEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, rewardSystemEnabled: e.target.checked } })} /> Reward System Enabled</label>
     <label className="admin-check"><input type="checkbox" checked={form.toggles.coinUsageEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, coinUsageEnabled: e.target.checked } })} /> Coin Usage Enabled</label>
     <label className="admin-check"><input type="checkbox" checked={form.toggles.voucherSystemEnabled} onChange={(e) => setForm({ ...form, toggles: { ...form.toggles, voucherSystemEnabled: e.target.checked } })} /> Voucher System Enabled</label>
 
-    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Earning (à¦ªà§à¦°à¦¤à¦¿ à§³à§§,à§¦à§¦à§¦ à¦•à§‡à¦¨à¦¾à¦•à¦¾à¦Ÿà¦¾à¦¯à¦¼ Coin)</h3>
-    <div className="field"><label>Retail (Customer) coins per à§³1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.retailPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, retailPer1000: Number(e.target.value) } })} required /></div>
-    <div className="field"><label>Reseller coins per à§³1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.resellerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, resellerPer1000: Number(e.target.value) } })} required /></div>
-    <div className="field"><label>Wholesaler coins per à§³1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.wholesalerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, wholesalerPer1000: Number(e.target.value) } })} required /></div>
+    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Earning (প্রতি ৳১,০০০ কেনাকাটায় Coin)</h3>
+    <div className="field"><label>Retail (Customer) coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.retailPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, retailPer1000: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Reseller coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.resellerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, resellerPer1000: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Wholesaler coins per ৳1,000</label><input type="number" min="0" step="0.01" value={form.coinEarning.wholesalerPer1000} onChange={(e) => setForm({ ...form, coinEarning: { ...form.coinEarning, wholesalerPer1000: Number(e.target.value) } })} required /></div>
 
-    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Redemption (Coin à¦¬à§à¦¯à¦¬à¦¹à¦¾à¦°/à¦®à§‚à¦²à§à¦¯)</h3>
+    <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Coin Redemption (Coin ব্যবহার/মূল্য)</h3>
     <div className="field"><label>Coins (e.g. 100)</label><input type="number" min="1" step="1" value={form.coinRedemption.coins} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, coins: Number(e.target.value) } })} required /></div>
     <div className="field"><label>Equals BDT (e.g. 5)</label><input type="number" min="0" step="0.01" value={form.coinRedemption.bdt} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, bdt: Number(e.target.value) } })} required /></div>
     <div className="field"><label>Minimum coins to redeem</label><input type="number" min="0" step="1" value={form.coinRedemption.minRedeemCoins} onChange={(e) => setForm({ ...form, coinRedemption: { ...form.coinRedemption, minRedeemCoins: Number(e.target.value) } })} required /></div>
-    <p className="subtle" style={{ gridColumn: "1 / -1", margin: 0 }}>Example: {form.coinRedemption.coins} Coin = à§³{form.coinRedemption.bdt}; minimum redemption {form.coinRedemption.minRedeemCoins} Coin.</p>
+    <p className="subtle" style={{ gridColumn: "1 / -1", margin: 0 }}>Example: {form.coinRedemption.coins} Coin = ৳{form.coinRedemption.bdt}; minimum redemption {form.coinRedemption.minRedeemCoins} Coin.</p>
 
     <h3 style={{ gridColumn: "1 / -1", margin: "12px 0 4px" }}>Shopping Reward Voucher Rules</h3>
-    <div className="field"><label>Purchase threshold (à§³)</label><input type="number" min="0" step="0.01" value={form.voucher.purchaseThreshold} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, purchaseThreshold: Number(e.target.value) } })} required /></div>
-    <div className="field"><label>Voucher amount (à§³)</label><input type="number" min="0" step="0.01" value={form.voucher.voucherAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, voucherAmount: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Purchase threshold (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.purchaseThreshold} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, purchaseThreshold: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Voucher amount (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.voucherAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, voucherAmount: Number(e.target.value) } })} required /></div>
     <div className="field"><label>Voucher expiry (days)</label><input type="number" min="0" step="1" value={form.voucher.expiryDays} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, expiryDays: Number(e.target.value) } })} required /></div>
-    <div className="field"><label>Minimum order amount to use voucher (à§³)</label><input type="number" min="0" step="0.01" value={form.voucher.minOrderAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, minOrderAmount: Number(e.target.value) } })} required /></div>
+    <div className="field"><label>Minimum order amount to use voucher (৳)</label><input type="number" min="0" step="0.01" value={form.voucher.minOrderAmount} onChange={(e) => setForm({ ...form, voucher: { ...form.voucher, minOrderAmount: Number(e.target.value) } })} required /></div>
 
-    <div className="wide" style={{ marginTop: 8 }}><button className="button-primary" disabled={saving}>{saving ? "Savingâ€¦" : "Save Coin & Reward Settings"}</button></div>
+    <div className="wide" style={{ marginTop: 8 }}><button className="button-primary" disabled={saving}>{saving ? "Saving…" : "Save Coin & Reward Settings"}</button></div>
     <p className="subtle wide" style={{ margin: 0 }}>Note: Settings are stored for future coin/voucher logic. Existing checkout, cart, pricing, and orders are not changed in this phase.</p>
   </form>;
+}
+
+function ProductReviewActions({ item, update }: { item: Item; update: (url: string, method: "PATCH" | "DELETE", body?: unknown) => Promise<string | null> }) {
+  const [activeAction, setActiveAction] = useState<"reply" | "delete" | null>(null);
+  const [reply, setReply] = useState(item.adminReply ?? "");
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState("");
+
+  async function submitReply(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setActionError("");
+    setBusy(true);
+    try {
+      const failure = await update(`/api/admin/product-comments/${item._id}`, "PATCH", { reply: reply.trim() });
+      if (failure) setActionError(failure);
+      else setActiveAction(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteReview() {
+    setActionError("");
+    setBusy(true);
+    try {
+      const failure = await update(`/api/admin/product-comments/${item._id}`, "DELETE");
+      if (failure) setActionError(failure);
+      else setActiveAction(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return <>
+    <div className="product-review-actions">
+      <button type="button" className="product-review-action" aria-expanded={activeAction === "reply"} onClick={() => {
+        setActionError("");
+        setActiveAction((current) => current === "reply" ? null : "reply");
+      }}>{item.adminReply ? "Edit reply" : "Reply to customer"}</button>
+      <button type="button" className="product-review-action is-destructive" aria-expanded={activeAction === "delete"} onClick={() => {
+        setActionError("");
+        setActiveAction((current) => current === "delete" ? null : "delete");
+      }}>Delete review</button>
+    </div>
+    {activeAction === "reply" && <form className="product-review-action-panel" onSubmit={submitReply}>
+      <label htmlFor={`review-reply-${item._id}`}>Reply to customer</label>
+      <textarea id={`review-reply-${item._id}`} value={reply} onChange={(event) => setReply(event.target.value)} minLength={2} maxLength={2000} required rows={3} />
+      {actionError && <p className="form-error" role="alert">{actionError}</p>}
+      <div className="product-review-action-buttons">
+        <button type="submit" className="product-review-action" disabled={busy || reply.trim().length < 2}>{busy ? "Sending…" : "Send reply"}</button>
+        <button type="button" className="product-review-action" disabled={busy} onClick={() => setActiveAction(null)}>Cancel</button>
+      </div>
+    </form>}
+    {activeAction === "delete" && <div className="product-review-action-panel is-delete">
+      <p>Delete this review? This action cannot be undone.</p>
+      {actionError && <p className="form-error" role="alert">{actionError}</p>}
+      <div className="product-review-action-buttons">
+        <button type="button" className="product-review-action is-destructive" disabled={busy} onClick={() => void deleteReview()}>{busy ? "Deleting…" : "Confirm delete"}</button>
+        <button type="button" className="product-review-action" disabled={busy} onClick={() => setActiveAction(null)}>Cancel</button>
+      </div>
+    </div>}
+  </>;
 }
 
 function DataTable({ tab, items, update, can, categories, vendors, userRole, userId, setError, setNotice, showAddForm, setShowAddForm, newOffer, setNewOffer, load }: { tab: string; items: Item[]; update: (url: string, method: "PATCH" | "DELETE" | "POST", body?: unknown) => Promise<string | null>; can: (permission: string) => boolean; categories: Category[]; vendors: VendorOption[]; userRole: string; userId: string; setError: (message: string) => void; setNotice: (message: string) => void; showAddForm: boolean; setShowAddForm: (v: boolean) => void; newOffer: { title: { en: string; bn: string }; subtitle: { en: string; bn: string }; link: string; order: number; active: boolean; image: string }; setNewOffer: (v: { title: { en: string; bn: string }; subtitle: { en: string; bn: string }; link: string; order: number; active: boolean; image: string }) => void; load: (t: string) => void }) {
@@ -723,6 +982,7 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
   const [deliveryActors, setDeliveryActors] = useState<DeliveryStaffOption[]>([]);
   const [deliveryAssignees, setDeliveryAssignees] = useState<DeliveryAssigneeOption[]>([]);
   const [auditFrequency, setAuditFrequency] = useState(0);
+  const [draggedCategoryId, setDraggedCategoryId] = useState("");
   const [, setDefaultDeliveryCharge] = useState(60);
   const [notificationProviders, setNotificationProviders] = useState<{ emailConfigured: boolean; smsConfigured: boolean } | null>(null);
 
@@ -753,18 +1013,17 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
     return () => { active = false; };
   }, [tab, can, setError]);
 
-  if (tab === "Product comments") return <div className="product-admin-comments">{items.map((item) => {
+  if (tab === "Product reviews") return <div className="product-admin-comments">{items.map((item) => {
     const product = typeof item.product === "object" && item.product ? item.product.title?.en : "";
     return <article className="product-admin-comment" key={item._id}>
-      <p className="eyebrow">{product || "Product"} Â· {item.customerName} Â· {item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}</p>
+      <p className="eyebrow">{product || "Product"} · {item.customerName} · {item.createdAt ? new Date(item.createdAt).toLocaleString() : ""}</p>
+      {item.rating !== undefined && <div className="product-review-stars" aria-label={`${item.rating} out of 5 stars`}>{"★".repeat(item.rating)}{"☆".repeat(5 - item.rating)}</div>}
       <p>{item.message}</p>
+      {item.images?.length ? <div className="product-comment-images">{item.images.map((url, index) => <a key={`${url}-${index}`} href={url} target="_blank" rel="noreferrer"><Image src={url} alt={`Review image ${index + 1}`} width={140} height={140} unoptimized /></a>)}</div> : null}
       {item.adminReply && <p className="product-comment-reply"><strong>Current reply:</strong> {item.adminReply}</p>}
-      <button className="inline-button" onClick={() => {
-        const reply = window.prompt("Reply to this customer comment", String(item.adminReply ?? ""));
-        if (reply?.trim()) void update(`/api/admin/product-comments/${item._id}`, "PATCH", { reply: reply.trim() });
-      }}>{item.adminReply ? "Edit reply" : "Reply to customer"}</button>
+      <ProductReviewActions item={item} update={update} />
     </article>;
-  })}{items.length === 0 && <p className="subtle">No customer comments yet.</p>}</div>;
+  })}{items.length === 0 && <p className="subtle">No customer reviews yet.</p>}</div>;
 
   if (tab === "Delivery staff") return <DeliveryStaffManager staff={items as unknown as { _id: string; employeeId?: string; name: string; email: string; phone?: string; address?: string; status: string; createdAt?: string }[]} reload={() => load(tab)} setNotice={setNotice} setError={setError} />;
 
@@ -777,51 +1036,51 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
     {isSimpleTab && showAddForm && (
       <section className="card" style={{ marginBottom: 16 }}>
         <h2 style={{ margin: 0, fontSize: 16 }}>
-          {tab === "Offers" ? "à¦¨à¦¤à§à¦¨ à¦…à¦«à¦¾à¦° à¦¯à§‹à¦— à¦•à¦°à§à¦¨" : "à¦¨à¦¤à§à¦¨ à¦˜à§‹à¦·à¦£à¦¾ à¦¯à§‹à¦— à¦•à¦°à§à¦¨"}
+          {tab === "Offers" ? "নতুন অফার যোগ করুন" : "নতুন ঘোষণা যোগ করুন"}
         </h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8" style={{ padding: 16 }}>
           <div>
-            <label className="form-label">à¦¶à¦¿à¦°à§‹à¦¨à¦¾à¦® (à¦‡à¦‚à¦°à§‡à¦œà¦¿)</label>
+            <label className="form-label">শিরোনাম (ইংরেজি)</label>
             <input
               className="form-input"
               value={newOffer.title.en}
               onChange={(e) => setNewOffer({ ...newOffer, title: { ...newOffer.title, en: e.target.value } })}
-              placeholder="à¦¯à§‡à¦®à¦¨: à¦†à¦œà¦•à§‡à¦° à¦…à¦«à¦¾à¦°"
+              placeholder="যেমন: আজকের অফার"
             />
           </div>
           <div>
-            <label className="form-label">à¦¶à¦¿à¦°à§‹à¦¨à¦¾à¦® (à¦¬à¦¾à¦‚à¦²à¦¾)</label>
+            <label className="form-label">শিরোনাম (বাংলা)</label>
             <input
               className="form-input"
               value={newOffer.title.bn}
               onChange={(e) => setNewOffer({ ...newOffer, title: { ...newOffer.title, bn: e.target.value } })}
-              placeholder="à¦¯à§‡à¦®à¦¨: à¦†à¦œà¦•à§‡à¦° à¦…à¦«à¦¾à¦°"
+              placeholder="যেমন: আজকের অফার"
             />
           </div>
           {tab === "Offers" && (
             <>
               <div>
-                <label className="form-label">à¦‰à¦ªà¦¶à¦¿à¦°à§‹à¦¨à¦¾à¦® (à¦‡à¦‚à¦°à§‡à¦œà¦¿)</label>
+                <label className="form-label">উপশিরোনাম (ইংরেজি)</label>
                 <input
                   className="form-input"
                   value={newOffer.subtitle.en}
                   onChange={(e) => setNewOffer({ ...newOffer, subtitle: { ...newOffer.subtitle, en: e.target.value } })}
-                  placeholder="à¦¯à§‡à¦®à¦¨: à§«à§¦% à¦›à¦¾à¦¡à¦¼, à¦†à¦œà¦•à§‡à¦° à¦¬à¦¿à¦¶à§‡à¦· à¦¦à¦¾à¦®"
+                  placeholder="যেমন: ৫০% ছাড়, আজকের বিশেষ দাম"
                 />
               </div>
               <div>
-                <label className="form-label">à¦‰à¦ªà¦¶à¦¿à¦°à§‹à¦¨à¦¾à¦® (à¦¬à¦¾à¦‚à¦²à¦¾)</label>
+                <label className="form-label">উপশিরোনাম (বাংলা)</label>
                 <input
                   className="form-input"
                   value={newOffer.subtitle.bn}
                   onChange={(e) => setNewOffer({ ...newOffer, subtitle: { ...newOffer.subtitle, bn: e.target.value } })}
-                  placeholder="à¦¯à§‡à¦®à¦¨: à§«à§¦% à¦›à¦¾à¦¡à¦¼, à¦†à¦œà¦•à§‡à¦° à¦¬à¦¿à¦¶à§‡à¦· à¦¦à¦¾à¦®"
+                  placeholder="যেমন: ৫০% ছাড়, আজকের বিশেষ দাম"
                 />
               </div>
             </>
           )}
           <div>
-            <label className="form-label">à¦²à¦¿à¦‚à¦•</label>
+            <label className="form-label">লিংক</label>
             <input
               className="form-input"
               value={newOffer.link}
@@ -830,16 +1089,16 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
             />
           </div>
           <div>
-            <label className="form-label">à¦›à¦¬à¦¿ URL (Cloudinary)</label>
+            <label className="form-label">ছবি URL (Cloudinary)</label>
             <input
               className="form-input"
               value={newOffer.image}
               onChange={(e) => setNewOffer({ ...newOffer, image: e.target.value })}
-              placeholder="à¦›à¦¬à¦¿à¦° à¦²à¦¿à¦‚à¦• à¦¦à¦¿à¦¨"
+              placeholder="ছবির লিংক দিন"
             />
           </div>
           <div>
-            <label className="form-label">à¦¸à¦°à§à¦Ÿ à¦…à¦°à§à¦¡à¦¾à¦°</label>
+            <label className="form-label">সর্ট অর্ডার</label>
             <input
               type="number"
               className="form-input"
@@ -848,14 +1107,14 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
             />
           </div>
           <div>
-            <label className="form-label">à¦¸à¦•à§à¦°à¦¿à¦¯à¦¼ à¦¥à¦¾à¦•à¦¬à§‡?</label>
+            <label className="form-label">সক্রিয় থাকবে?</label>
             <select
               className="form-input"
               value={newOffer.active ? "true" : "false"}
               onChange={(e) => setNewOffer({ ...newOffer, active: e.target.value === "true" })}
             >
-              <option value="true">à¦¹à§à¦¯à¦¾à¦</option>
-              <option value="false">à¦¨à¦¾</option>
+              <option value="true">হ্যাঁ</option>
+              <option value="false">না</option>
             </select>
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -863,7 +1122,7 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
               className="button"
               onClick={async () => {
                 if (!newOffer.title.en.trim()) {
-                  setError("à¦¶à¦¿à¦°à§‹à¦¨à¦¾à¦® à¦¦à¦°à¦•à¦¾à¦°");
+                  setError("শিরোনাম দরকার");
                   return;
                 }
                 try {
@@ -881,16 +1140,16 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
                     active: true,
                     image: "",
                   });
-                  setNotice("à¦¯à§‹à¦— à¦•à¦°à¦¾ à¦¹à¦²à§‹");
+                  setNotice("যোগ করা হলো");
                   void load(tab);
                 } catch (err) {
-                  setError(err instanceof Error ? err.message : "à¦…à¦¤à¦¿à¦°à¦¿à¦•à§à¦¤ à¦¸à¦®à¦¸à§à¦¯à¦¾");
+                  setError(err instanceof Error ? err.message : "অতিরিক্ত সমস্যা");
                 }
               }}
             >
-                          à¦¯à§‹à¦— à¦•à¦°à§à¦¨
+                          যোগ করুন
             </button>
-            <button className="inline-button" onClick={() => setShowAddForm(false)}>à¦¬à¦¾à¦¤à¦¿à¦²</button>
+            <button className="inline-button" onClick={() => setShowAddForm(false)}>বাতিল</button>
           </div>
         </div>
       </section>
@@ -901,7 +1160,7 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
         onClick={() => setShowAddForm(true)}
         style={{ marginBottom: 12, float: "right" }}
       >
-        + à¦¨à¦¤à§à¦¨ {tab === "Offers" ? "à¦…à¦«à¦¾à¦°" : "à¦˜à§‹à¦·à¦£à¦¾"} à¦¯à§‹à¦— à¦•à¦°à§à¦¨
+        + নতুন {tab === "Offers" ? "অফার" : "ঘোষণা"} যোগ করুন
       </button>
     )}
     {editingProduct && <ProductEditor
@@ -916,8 +1175,28 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
       const variants = item.variants ?? [];
       const effectivePrice = item.discountPrice ?? item.price;
       const categoryName = typeof item.category === "object" && item.category !== null ? item.category.name?.en : "";
-      return <tr key={item._id}>
-        <td>{localizedName(item)}</td>
+      return <tr
+        key={item._id}
+        draggable={tab === "Categories"}
+        onDragStart={tab === "Categories" ? (event) => {
+          setDraggedCategoryId(item._id);
+          event.dataTransfer.effectAllowed = "move";
+        } : undefined}
+        onDrop={tab === "Categories" ? (event) => {
+          event.preventDefault();
+          if (!draggedCategoryId || draggedCategoryId === item._id) return;
+          const ordered = items.map((category) => category._id);
+          const from = ordered.indexOf(draggedCategoryId);
+          const to = ordered.indexOf(item._id);
+          if (from < 0 || to < 0) return;
+          ordered.splice(from, 1);
+          ordered.splice(to, 0, draggedCategoryId);
+          void update("/api/categories/reorder", "POST", { items: ordered.map((id, order) => ({ id, order })) });
+          setDraggedCategoryId("");
+        } : undefined}
+        onDragOver={tab === "Categories" ? (event) => event.preventDefault() : undefined}
+      >
+        <td>{localizedName(item)}{tab === "Categories" && <><small className="admin-product-unit">{item.parentCategory ? "Sub-category" : "Main category"} · Order: {item.order ?? 0} · Drag to reorder</small></>}</td>
         {tab === "Offers" && <>
           <td>{(item.subtitle as { en?: string } | undefined)?.en ?? ""}</td>
           <td>{item.link ?? ""}</td>
@@ -928,11 +1207,11 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
           <td>{item.order ?? 0}</td>
         </>}
         {(tab === "Products" || tab === "My products" || tab === "Featured products") && <>
-          <td><strong>{categoryName || "â€”"}</strong><small className="admin-product-unit">{variants.length ? variants.map((variant) => `${variant.label}: à§³${variant.price.toLocaleString("en-BD")} Â· stock ${variant.stock}`).join(" | ") : `${unitLabel(item.unit)}${item.stock !== undefined ? ` Â· stock ${item.stock}` : ""}`}</small></td>
-          <td>{variants.length ? <><strong>From à§³{Math.min(...variants.map((variant) => variant.price)).toLocaleString("en-BD")}</strong><small className="admin-product-unit">Price varies by option</small></> : effectivePrice === undefined ? "â€”" : <><strong>à§³{effectivePrice.toLocaleString("en-BD")}</strong>{item.discountPrice != null && item.price != null && <small className="admin-product-unit"><del>à§³{item.price.toLocaleString("en-BD")}</del> sale / {unitLabel(item.unit)}</small>}{item.discountPrice == null && <small className="admin-product-unit">per {unitLabel(item.unit)}</small>}</>}</td>
+          <td><strong>{categoryName || "—"}</strong><small className="admin-product-unit">{variants.length ? variants.map((variant) => `${variant.label}: ৳${variant.price.toLocaleString("en-BD")} · stock ${variant.stock}`).join(" | ") : `${unitLabel(item.unit)}${item.stock !== undefined ? ` · stock ${item.stock}` : ""}`}</small></td>
+          <td>{variants.length ? <><strong>From ৳{Math.min(...variants.map((variant) => variant.price)).toLocaleString("en-BD")}</strong><small className="admin-product-unit">Price varies by option</small></> : effectivePrice === undefined ? "—" : <><strong>৳{effectivePrice.toLocaleString("en-BD")}</strong>{item.discountPrice != null && item.price != null && <small className="admin-product-unit"><del>৳{item.price.toLocaleString("en-BD")}</del> sale / {unitLabel(item.unit)}</small>}{item.discountPrice == null && <small className="admin-product-unit">per {unitLabel(item.unit)}</small>}</>}</td>
           <td>{item.featured ? "Yes" : "No"}{can("manage_featured") && <button className="inline-button" onClick={() => void update(`/api/products/${item._id}`, "PATCH", { featured: !item.featured })}>Toggle</button>}</td>
         </>}
-        <td><span className="status-pill">{item.active === false ? "inactive" : "active"}</span></td>
+        <td><span className="status-pill">{tab === "Categories" && item.archived === true ? "archived" : item.active === false ? "inactive" : "active"}</span></td>
         {tab === "Products" && <td><span className="status-pill">{item.approved === false ? "pending review" : "approved"}</span>{can("manage_products") && <button className="inline-button" onClick={() => void update(`/api/products/${item._id}`, "PATCH", { approved: item.approved === false, active: item.approved === false })}>{item.approved === false ? "Approve" : "Unapprove"}</button>}</td>}
         <td>{tab !== "Featured products" && <button className="inline-button" onClick={() => {
       if (tab === "Categories") {
@@ -945,15 +1224,33 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
         if (parentCategory === null) return;
         const order = window.prompt("Order / Priority", String(item.order ?? 0));
         if (order === null) return;
+        const variantTemplate = window.prompt(`Default product options (${VARIANT_TEMPLATE_KEYS.filter((key) => key !== "standard_default").join(", ")}; leave blank to detect automatically)`, typeof item.variantTemplate === "string" ? item.variantTemplate : "");
+        if (variantTemplate === null) return;
         const isFeatured = window.prompt("Show in homepage category strip? (yes/no)", item.isFeatured ? "yes" : "no");
         if (isFeatured === null) return;
         const image = window.prompt("Cloudinary image/icon URL (leave blank to remove)", item.image ?? "");
-        if (image !== null) void update(`${endpoint}/${item._id}`, "PATCH", {
+        if (image === null) return;
+        const attributeDefinitionsJson = window.prompt("Dynamic attribute definitions JSON (leave as is; use [] to remove)", JSON.stringify(item.attributeDefinitions ?? [], null, 2));
+        if (attributeDefinitionsJson === null) return;
+        let attributeDefinitions: CategoryAttributeDefinition[] | undefined;
+        try {
+          if (attributeDefinitionsJson.trim()) {
+            const parsedAttributes = JSON.parse(attributeDefinitionsJson) as unknown;
+            if (!Array.isArray(parsedAttributes)) throw new Error("Attribute definitions must be a JSON array.");
+            attributeDefinitions = parsedAttributes as CategoryAttributeDefinition[];
+          }
+        } catch (reason) {
+          setError(reason instanceof Error ? reason.message : "Invalid attribute definitions JSON.");
+          return;
+        }
+        void update(`${endpoint}/${item._id}`, "PATCH", {
           name: { en, bn },
           parentCategory: parentCategory.trim() || undefined,
+          variantTemplate: variantTemplate.trim(),
           order: Number(order),
           isFeatured: /^y(es)?|true|1$/i.test(isFeatured.trim()),
           image: image.trim(),
+          ...(attributeDefinitions ? { attributeDefinitions } : {}),
         });
       } else if (tab === "Banners") {
         const title = item.title as { en?: string; bn?: string };
@@ -1024,7 +1321,24 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
       } else {
         setEditingProduct(item);
       }
-    }}>{tab === "Categories" || tab === "Banners" || tab === "Offers" || tab === "Announcements" ? "Edit" : "Edit product"}</button>}{tab !== "Featured products" && tab !== "My products" && <button className="inline-button" onClick={() => void update(`${endpoint}/${item._id}`, "PATCH", { active: item.active === false })}>{item.active === false ? "Activate" : "Deactivate"}</button>}{tab !== "Featured products" && <button className="inline-button" onClick={() => { if (window.confirm("Delete this item?")) void update(`${endpoint}/${item._id}`, "DELETE"); }}>Delete</button>}</td></tr>;
+    }}>Edit</button>}
+    {tab === "Categories" && item.archived === true && <button className="inline-button" onClick={() => void update(`${endpoint}/${item._id}`, "PATCH", { archived: false, active: true })}>Restore</button>}
+    {tab === "Categories" && item.archived !== true && <button className="inline-button" onClick={() => {
+      const reason = window.prompt("Archive reason (optional)", "");
+      if (reason !== null && window.confirm("Archive this category? Existing products and sub-categories will be preserved.")) void update(`${endpoint}/${item._id}`, "DELETE", { action: "archive", reason: reason.trim() });
+    }}>Archive</button>}
+    {tab !== "Categories" && tab !== "Featured products" && tab !== "My products" && <button className="inline-button" onClick={() => void update(`${endpoint}/${item._id}`, "PATCH", { active: item.active === false })}>{item.active === false ? "Activate" : "Deactivate"}</button>}
+    {tab === "Categories" && <button className="inline-button" onClick={() => {
+      if (window.confirm("Delete/reassign category? Existing products must be reassigned; choose OK to enter a replacement category ID.")) {
+        const reassignTo = window.prompt("Replacement category ID");
+        if (reassignTo) void update(`${endpoint}/${item._id}`, "DELETE", { action: "reassign", reassignTo: reassignTo.trim(), reassignSubcategoriesTo: null });
+      }
+    }}>Delete / reassign</button>}
+    {tab !== "Categories" && tab !== "Featured products" && <button className="inline-button" onClick={() => {
+      const prompt = tab === "Products" || tab === "My products" ? "Move this product to the Product Recycle Bin? An admin can restore it." : "Delete this item?";
+      if (window.confirm(prompt)) void update(`${endpoint}/${item._id}`, "DELETE");
+    }}>{tab === "Products" || tab === "My products" ? "Move to recycle bin" : "Delete"}</button>}
+    </td></tr>;
     })}</tbody></table></>;
   }
   if (["Bookings", "Customer Orders", "My bookings"].includes(tab)) {
@@ -1058,7 +1372,7 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
       </label>
       <button className="button-secondary" onClick={() => void update("/api/admin/delivery-settings", "PATCH", { auditFrequencyPercent: auditFrequency })}>Save audit frequency</button>
       <p>Each order is sampled at most once after a successful delivery update. Sampling creates an admin review request only.</p>
-      <p>In-site notifications: available Â· Email provider: {notificationProviders?.emailConfigured ? "configured (sending not enabled)" : "not configured"} Â· SMS provider: {notificationProviders?.smsConfigured ? "configured (sending not enabled)" : "not configured"}</p>
+      <p>In-site notifications: available · Email provider: {notificationProviders?.emailConfigured ? "configured (sending not enabled)" : "not configured"} · SMS provider: {notificationProviders?.smsConfigured ? "configured (sending not enabled)" : "not configured"}</p>
     </section>}
     <table className="data-table"><thead><tr><th>Order</th><th>Customer / items</th><th>Total</th><th>Status / verification</th><th>Delivery management</th></tr></thead><tbody>{items.map((item) => {
     const itemLines = item.items ?? [];
@@ -1088,18 +1402,18 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
     const canAssignOrder = (item.status === "shipped" || item.status === "failed") && itemLines.length > 0 && itemLines.every((line) => line.status === "shipped" || line.status === "failed");
     const canDeliver = canManage && (hasShippedItems || hasRetryItems);
     const deliveryEndpoint = `/api/orders/${item._id}/delivery`;
-    return <tr key={item._id}><td>#{item._id.slice(-8).toUpperCase()}<br />{item.deliveryAuditValid === false && <span className="delivery-flag">Audit history integrity check failed</span>}</td><td>{customer && <><strong>{customer.name}</strong><br />{customer.phone}<br />{[customer.address, customer.area, customer.union, customer.upazila, customer.district, customer.division].filter(Boolean).join(", ")}<br /></>}{itemLines.map((line) => `${line.title}${line.variantLabel ? ` (${line.variantLabel})` : ""} Ã— ${line.quantity} ${unitLabel(line.unit)} Â· à§³${Number(line.unitPrice ?? 0).toLocaleString("en-BD")} each Â· à§³${(Number(line.unitPrice ?? 0) * Number(line.quantity ?? 0)).toLocaleString("en-BD")} total (${line.status})`).join(", ")}{riskFlags.map((flag) => <span className="delivery-flag" key={flag}>{flag}</span>)}</td><td>à§³{Number(item.total ?? 0).toLocaleString("en-BD")}</td><td><span className="status-pill">{item.status}</span><br />{delivery?.assignment && <span className="delivery-meta">Assigned to {assignedStaff ? `${assignedStaff.name} (${assignedStaff.employeeId})` : delivery.assignment.assignedTo}</span>}<span className="delivery-meta">Admin verification: {delivery?.verificationStatus ?? "not_required"}</span>{item.deliveryAuditProtection && <span className="delivery-meta">Audit protection: {item.deliveryAuditProtection}</span>}{delivery?.deliveredAt && <span className="delivery-meta">Delivered {new Date(delivery.deliveredAt).toLocaleString()} Â· staff {delivery.deliveredBy}</span>}{delivery?.failedReason && <span className="delivery-meta">Failed: {delivery.failedReason}</span>}{delivery?.notes && <span className="delivery-meta">Note: {delivery.notes}</span>}{handovers.map((handover) => {
+    return <tr key={item._id}><td>#{item._id.slice(-8).toUpperCase()}<br />{item.deliveryAuditValid === false && <span className="delivery-flag">Audit history integrity check failed</span>}</td><td>{customer && <><strong>{customer.name}</strong><br />{customer.phone}<br />{[customer.address, customer.area, customer.union, customer.upazila, customer.district, customer.division].filter(Boolean).join(", ")}<br /></>}{itemLines.map((line) => `${line.title}${line.variantLabel ? ` (${line.variantLabel})` : ""} × ${line.quantity} ${unitLabel(line.unit)} · ৳${Number(line.unitPrice ?? 0).toLocaleString("en-BD")} each · ৳${(Number(line.unitPrice ?? 0) * Number(line.quantity ?? 0)).toLocaleString("en-BD")} total (${line.status})`).join(", ")}{riskFlags.map((flag) => <span className="delivery-flag" key={flag}>{flag}</span>)}</td><td>৳{Number(item.total ?? 0).toLocaleString("en-BD")}</td><td><span className="status-pill">{item.status}</span><br />{delivery?.assignment && <span className="delivery-meta">Assigned to {assignedStaff ? `${assignedStaff.name} (${assignedStaff.employeeId})` : delivery.assignment.assignedTo}</span>}<span className="delivery-meta">Admin verification: {delivery?.verificationStatus ?? "not_required"}</span>{item.deliveryAuditProtection && <span className="delivery-meta">Audit protection: {item.deliveryAuditProtection}</span>}{delivery?.deliveredAt && <span className="delivery-meta">Delivered {new Date(delivery.deliveredAt).toLocaleString()} · staff {delivery.deliveredBy}</span>}{delivery?.failedReason && <span className="delivery-meta">Failed: {delivery.failedReason}</span>}{delivery?.notes && <span className="delivery-meta">Note: {delivery.notes}</span>}{handovers.map((handover) => {
       const remaining = Math.max(0, handover.acceptedQuantity - handover.verifiedDeliveredQuantity - handover.returnedQuantity - handover.missingQuantity - handover.disputedQuantity);
       return <div className="delivery-ledger" key={handover._id}>
-        <strong>{handover.title} Â· assigned to {handover.assignedTo}</strong>
-        <span>Assigned {handover.assignedQuantity} Â· accepted {handover.acceptedQuantity} Â· delivered reported {handover.deliveredQuantity} Â· verified delivered {handover.verifiedDeliveredQuantity}</span>
-        <span>Physically returned {handover.returnedQuantity} Â· remaining {remaining} Â· missing {handover.missingQuantity} Â· disputed {handover.disputedQuantity}</span>
-        <span>COD due à§³{handover.codDue.toLocaleString("en-BD")} Â· reported collected à§³{handover.codCollected.toLocaleString("en-BD")} Â· physically settled à§³{handover.codSettled.toLocaleString("en-BD")} Â· discrepancy à§³{handover.codDisputed.toLocaleString("en-BD")}</span>
+        <strong>{handover.title} · assigned to {handover.assignedTo}</strong>
+        <span>Assigned {handover.assignedQuantity} · accepted {handover.acceptedQuantity} · delivered reported {handover.deliveredQuantity} · verified delivered {handover.verifiedDeliveredQuantity}</span>
+        <span>Physically returned {handover.returnedQuantity} · remaining {remaining} · missing {handover.missingQuantity} · disputed {handover.disputedQuantity}</span>
+        <span>COD due ৳{handover.codDue.toLocaleString("en-BD")} · reported collected ৳{handover.codCollected.toLocaleString("en-BD")} · physically settled ৳{handover.codSettled.toLocaleString("en-BD")} · discrepancy ৳{handover.codDisputed.toLocaleString("en-BD")}</span>
         {handover.assignedTo === userId && !handover.acceptedAt && <button className="inline-button" onClick={() => { const quantity = window.prompt(`Physical quantity accepted for ${handover.title}`, String(handover.assignedQuantity)); if (quantity !== null) void update(deliveryEndpoint, "POST", { action: "accept_handover", handoverId: handover._id, acceptedQuantity: Number(quantity) }); }}>Accept physical handover</button>}
-        {handover.assignedTo === userId && Boolean(handover.acceptedAt) && <button className="inline-button" onClick={() => { const amount = window.prompt(`COD physically collected so far (due à§³${handover.codDue})`, String(handover.codCollected)); if (amount !== null) void update(deliveryEndpoint, "POST", { action: "record_cod_collection", handoverId: handover._id, amount: Number(amount) - handover.codCollected }); }}>Record COD collection</button>}
-        {can("manage_bookings") && <><button className="inline-button" onClick={() => { const quantity = window.prompt(`Verified delivered quantity (reported: ${handover.deliveredQuantity})`, String(handover.deliveredQuantity)); if (quantity !== null) void update(deliveryEndpoint, "POST", { action: "verify_handover", handoverId: handover._id, verifiedQuantity: Number(quantity) }); }}>Verify delivered quantity</button><button className="inline-button" onClick={() => { const missing = window.prompt("Additional missing quantity", "0"); if (missing === null) return; const disputed = window.prompt("Additional disputed quantity", "0"); if (disputed !== null) void update(deliveryEndpoint, "POST", { action: "reconcile_handover", handoverId: handover._id, missingQuantity: Number(missing), disputedQuantity: Number(disputed) }); }}>Reconcile quantity</button><button className="inline-button" onClick={() => { const amount = window.prompt(`Physical COD amount received (reported: à§³${handover.codCollected})`, String(handover.codCollected)); if (amount !== null) void update(deliveryEndpoint, "POST", { action: "settle_cod", handoverId: handover._id, amount: Number(amount) }); }}>Settle COD physically</button></>}
+        {handover.assignedTo === userId && Boolean(handover.acceptedAt) && <button className="inline-button" onClick={() => { const amount = window.prompt(`COD physically collected so far (due ৳${handover.codDue})`, String(handover.codCollected)); if (amount !== null) void update(deliveryEndpoint, "POST", { action: "record_cod_collection", handoverId: handover._id, amount: Number(amount) - handover.codCollected }); }}>Record COD collection</button>}
+        {can("manage_bookings") && <><button className="inline-button" onClick={() => { const quantity = window.prompt(`Verified delivered quantity (reported: ${handover.deliveredQuantity})`, String(handover.deliveredQuantity)); if (quantity !== null) void update(deliveryEndpoint, "POST", { action: "verify_handover", handoverId: handover._id, verifiedQuantity: Number(quantity) }); }}>Verify delivered quantity</button><button className="inline-button" onClick={() => { const missing = window.prompt("Additional missing quantity", "0"); if (missing === null) return; const disputed = window.prompt("Additional disputed quantity", "0"); if (disputed !== null) void update(deliveryEndpoint, "POST", { action: "reconcile_handover", handoverId: handover._id, missingQuantity: Number(missing), disputedQuantity: Number(disputed) }); }}>Reconcile quantity</button><button className="inline-button" onClick={() => { const amount = window.prompt(`Physical COD amount received (reported: ৳${handover.codCollected})`, String(handover.codCollected)); if (amount !== null) void update(deliveryEndpoint, "POST", { action: "settle_cod", handoverId: handover._id, amount: Number(amount) }); }}>Settle COD physically</button></>}
       </div>;
-    })}{openReports.map((report) => <span className="delivery-flag" key={report._id}>Customer report: {report.reason}{report.details ? ` â€” ${report.details}` : ""}</span>)}{item.deliveryAudit && item.deliveryAudit.length > 0 && <details className="delivery-audit-history"><summary>Audit history ({item.deliveryAudit.length})</summary><ol>{item.deliveryAudit.map((entry, index) => <li key={`${entry.hash}-${index}`}><strong>{entry.event}</strong><span>{new Date(entry.occurredAt).toLocaleString()} Â· {entry.actorRole} {entry.actorId}</span>{entry.details && <span>{entry.details}</span>}<code>{entry.hash}</code></li>)}</ol></details>}</td><td>{canManage ? <><select defaultValue="" aria-label="Update order status" onChange={(event) => { if (event.target.value) void update(`/api/orders/${item._id}`, "PATCH", { status: event.target.value }); }}><option value="">Order status</option>{possible.map((status) => <option key={status} value={status}>{status}</option>)}</select><div className="delivery-actions">
+    })}{openReports.map((report) => <span className="delivery-flag" key={report._id}>Customer report: {report.reason}{report.details ? ` — ${report.details}` : ""}</span>)}{item.deliveryAudit && item.deliveryAudit.length > 0 && <details className="delivery-audit-history"><summary>Audit history ({item.deliveryAudit.length})</summary><ol>{item.deliveryAudit.map((entry, index) => <li key={`${entry.hash}-${index}`}><strong>{entry.event}</strong><span>{new Date(entry.occurredAt).toLocaleString()} · {entry.actorRole} {entry.actorId}</span>{entry.details && <span>{entry.details}</span>}<code>{entry.hash}</code></li>)}</ol></details>}</td><td>{canManage ? <><select defaultValue="" aria-label="Update order status" onChange={(event) => { if (event.target.value) void update(`/api/orders/${item._id}`, "PATCH", { status: event.target.value }); }}><option value="">Order status</option>{possible.map((status) => <option key={status} value={status}>{status}</option>)}</select><div className="delivery-actions">
       {can("manage_bookings") && canAssignOrder && handovers.length === 0 && deliveryAssignees.length > 0 && <button className="inline-button" onClick={() => {
         const staffIndex = window.prompt(`Assign this order to which delivery staff member?\n${deliveryAssignees.map((staff, index) => `${index + 1}) ${staff.name} (${staff.employeeId})`).join("\n")}`);
         if (staffIndex === null) return;
@@ -1129,11 +1443,11 @@ function DataTable({ tab, items, update, can, categories, vendors, userRole, use
       : tab === "Wholesaler Applications" ? items.filter((item) => item.applicationType === "wholesaler")
       : tab === "Reseller & Wholesaler applications" ? items.filter((item) => item.applicationType === "reseller" || item.applicationType === "wholesaler")
       : items.filter((item) => (item.applicationType ?? "vendor") === "vendor");
-    const emptyLabel = tab === "Reseller Applications" ? "à¦•à§‹à¦¨à§‹ à¦°à¦¿à¦¸à§‡à¦²à¦¾à¦° à¦†à¦¬à§‡à¦¦à¦¨ à¦¨à§‡à¦‡à¥¤" : tab === "Wholesaler Applications" ? "à¦•à§‹à¦¨à§‹ à¦¹à§‹à¦²à¦¸à§‡à¦²à¦¾à¦° à¦†à¦¬à§‡à¦¦à¦¨ à¦¨à§‡à¦‡à¥¤" : tab === "Reseller & Wholesaler applications" ? "à¦•à§‹à¦¨à§‹ à¦°à¦¿à¦¸à§‡à¦²à¦¾à¦°/à¦¹à§‹à¦²à¦¸à§‡à¦²à¦¾à¦° à¦†à¦¬à§‡à¦¦à¦¨ à¦¨à§‡à¦‡à¥¤" : "à¦•à§‹à¦¨à§‹ à¦­à§‡à¦¨à§à¦¡à¦° à¦†à¦¬à§‡à¦¦à¦¨ à¦¨à§‡à¦‡à¥¤";
+    const emptyLabel = tab === "Reseller Applications" ? "কোনো রিসেলার আবেদন নেই।" : tab === "Wholesaler Applications" ? "কোনো হোলসেলার আবেদন নেই।" : tab === "Reseller & Wholesaler applications" ? "কোনো রিসেলার/হোলসেলার আবেদন নেই।" : "কোনো ভেন্ডর আবেদন নেই।";
     if (filtered.length === 0) return <p className="subtle">{emptyLabel}</p>;
-    return <table className="data-table"><thead><tr><th>Type</th><th>Shop / contact</th><th>Details / documents</th><th>Status</th><th>Decision</th></tr></thead><tbody>{filtered.map((item) => <tr key={item._id}><td><span className="status-pill">{String((item as Record<string, unknown>).applicationType ?? "vendor")}</span></td><td>{String(item.shopName)}<br />{String(item.email)}<br />{item.createdAt ? new Date(String(item.createdAt)).toLocaleString() : ""}</td><td><strong>{String(item.name)}</strong> Â· {String(item.phone)}<br />{String(item.address)}{(item as Record<string, unknown>).tradeLicense ? <><br />Trade license: {String((item as Record<string, unknown>).tradeLicense)}</> : null}{(item as Record<string, unknown>).description ? <><br /><span className="subtle">{String((item as Record<string, unknown>).description)}</span></> : null}<br />{Array.isArray(item.documents) && item.documents.map((document, index) => <a className="inline-button" key={String(document)} href={String(document)} target="_blank" rel="noreferrer">Document {index + 1}</a>)}</td><td><span className="status-pill">{String(item.status)}</span></td><td>{item.status === "pending" && <><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "approved" })}>Approve</button><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "rejected" })}>Reject</button></>}<button className="inline-button" onClick={() => { const approved = item.status === "approved"; if (window.confirm(approved ? "Remove this application? If the account has products or orders, it will be suspended instead of deleted." : "Delete this application permanently?")) void update(`/api/vendor-applications/${item._id}`, "DELETE").then((failure) => { if (!failure) setNotice("Application removed."); }); }}>Delete</button></td></tr>)}</tbody></table>;
+    return <table className="data-table"><thead><tr><th>Type</th><th>Shop / contact</th><th>Details / documents</th><th>Status</th><th>Decision</th></tr></thead><tbody>{filtered.map((item) => <tr key={item._id}><td><span className="status-pill">{String((item as Record<string, unknown>).applicationType ?? "vendor")}</span></td><td>{String(item.shopName)}<br />{String(item.email)}<br />{item.createdAt ? new Date(String(item.createdAt)).toLocaleString() : ""}</td><td><strong>{String(item.name)}</strong> · {String(item.phone)}<br />{String(item.address)}{(item as Record<string, unknown>).tradeLicense ? <><br />Trade license: {String((item as Record<string, unknown>).tradeLicense)}</> : null}{(item as Record<string, unknown>).description ? <><br /><span className="subtle">{String((item as Record<string, unknown>).description)}</span></> : null}<br />{Array.isArray(item.documents) && item.documents.map((document, index) => <a className="inline-button" key={String(document)} href={String(document)} target="_blank" rel="noreferrer">Document {index + 1}</a>)}</td><td><span className="status-pill">{String(item.status)}</span></td><td>{item.status === "pending" && <><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "approved" })}>Approve</button><button className="inline-button" onClick={() => void update(`/api/vendor-applications/${item._id}`, "PATCH", { status: "rejected" })}>Reject</button></>}<button className="inline-button" onClick={() => { const approved = item.status === "approved"; if (window.confirm(approved ? "Remove this application? If the account has products or orders, it will be suspended instead of deleted." : "Delete this application permanently?")) void update(`/api/vendor-applications/${item._id}`, "DELETE").then((failure) => { if (!failure) setNotice("Application removed."); }); }}>Delete</button></td></tr>)}</tbody></table>;
   }
-  if (tab === "Messages") return <table className="data-table"><thead><tr><th>From</th><th>Subject</th><th>Message</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td><strong>{String(item.name)}</strong><br />{String(item.email)}{item.phone ? <><br />Phone: {String(item.phone)}</> : null}{item.address ? <><br />Address: {String(item.address)}</> : null}{item.inquiryType ? <><br /><span className="status-pill">{String(item.inquiryType)}</span></> : null}</td><td>{String(item.subject)}</td><td style={{ whiteSpace: "pre-wrap" }}>{String(item.message)}</td><td>{new Date(String(item.createdAt)).toLocaleDateString()}</td><td>{item.read ? <span className="status-pill">Read</span> : <span className="status-pill">New</span>}</td><td><button className="inline-button" onClick={() => void update(`/api/contact/${item._id}`, "PATCH", { read: !item.read })}>{item.read ? "Mark unread" : "Mark read"}</button><button className="inline-button" onClick={() => { if (window.confirm("à¦à¦‡ à¦®à§‡à¦¸à§‡à¦œà¦Ÿà¦¿ à¦¸à§à¦¥à¦¾à¦¯à¦¼à§€à¦­à¦¾à¦¬à§‡ à¦®à§à¦›à§‡ à¦«à§‡à¦²à¦¬à§‡à¦¨?")) void update(`/api/contact/${item._id}`, "DELETE"); }}>Delete</button></td></tr>)}</tbody></table>;
+  if (tab === "Messages") return <table className="data-table"><thead><tr><th>From</th><th>Subject</th><th>Message</th><th>Date</th><th>Status</th><th>Actions</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td><strong>{String(item.name)}</strong><br />{String(item.email)}{item.phone ? <><br />Phone: {String(item.phone)}</> : null}{item.address ? <><br />Address: {String(item.address)}</> : null}{item.inquiryType ? <><br /><span className="status-pill">{String(item.inquiryType)}</span></> : null}</td><td>{String(item.subject)}</td><td style={{ whiteSpace: "pre-wrap" }}>{String(item.message)}</td><td>{new Date(String(item.createdAt)).toLocaleDateString()}</td><td>{item.read ? <span className="status-pill">Read</span> : <span className="status-pill">New</span>}</td><td><button className="inline-button" onClick={() => void update(`/api/contact/${item._id}`, "PATCH", { read: !item.read })}>{item.read ? "Mark unread" : "Mark read"}</button><button className="inline-button" onClick={() => { if (window.confirm("এই মেসেজটি স্থায়ীভাবে মুছে ফেলবেন?")) void update(`/api/contact/${item._id}`, "DELETE"); }}>Delete</button></td></tr>)}</tbody></table>;
   if (tab === "Admin users") return <table className="data-table"><thead><tr><th>Name</th><th>Email</th><th>Permissions</th><th>Status</th><th>Action</th></tr></thead><tbody>{items.map((item) => <tr key={item._id}><td>{String(item.name)}</td><td>{String(item.email)}</td><td>{Array.isArray(item.permissions) ? item.permissions.map(String).join(", ") : ""}</td><td>{String(item.status)}</td><td><button className="inline-button" onClick={() => {
     const current = Array.isArray(item.permissions) ? item.permissions.map(String).join(", ") : "";
     const value = window.prompt(`Enter permission names separated by commas:\n${permissionOptions.map(([permission]) => permission).join(", ")}`, current);
@@ -1224,13 +1538,13 @@ function RewardsVouchersMonitor() {
     finally { setBusy(false); }
   }
 
-  if (loading) return <div className="dashboard-card"><p className="subtle">Loading rewards overviewâ€¦</p></div>;
+  if (loading) return <div className="dashboard-card"><p className="subtle">Loading rewards overview…</p></div>;
   return <div className="stack">
     <div className="dashboard-card stack"><h2>Rewards &amp; Vouchers Monitor</h2><p className="subtle">Super-admin overview of coin circulation, vouchers, and business accounts.</p>
       {error && <p className="form-error">{error}</p>}{notice && <p style={{ color: "#166534" }}>{notice}</p>}
       <div className="dashboard-grid">
         <div className="dashboard-card"><h3>Coins</h3><p><strong>Total earned:</strong> {Number(data?.coins?.totalEarned || 0).toLocaleString("en-BD")}</p><p><strong>Total redeemed:</strong> {Number(data?.coins?.totalRedeemed || 0).toLocaleString("en-BD")}</p><p><strong>Total balance (wallets):</strong> {Number(data?.coins?.totalBalance || 0).toLocaleString("en-BD")}</p></div>
-        <div className="dashboard-card"><h3>Vouchers</h3><p><strong>Active:</strong> {data?.vouchers?.active?.count || 0} (à§³{Number(data?.vouchers?.active?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Used:</strong> {data?.vouchers?.used?.count || 0} (à§³{Number(data?.vouchers?.used?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Expired:</strong> {data?.vouchers?.expired?.count || 0} (à§³{Number(data?.vouchers?.expired?.amount || 0).toLocaleString("en-BD")})</p></div>
+        <div className="dashboard-card"><h3>Vouchers</h3><p><strong>Active:</strong> {data?.vouchers?.active?.count || 0} (৳{Number(data?.vouchers?.active?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Used:</strong> {data?.vouchers?.used?.count || 0} (৳{Number(data?.vouchers?.used?.amount || 0).toLocaleString("en-BD")})</p><p><strong>Expired:</strong> {data?.vouchers?.expired?.count || 0} (৳{Number(data?.vouchers?.expired?.amount || 0).toLocaleString("en-BD")})</p></div>
         <div className="dashboard-card"><h3>Business accounts</h3><p><strong>Active resellers:</strong> {data?.roles?.activeResellers || 0}</p><p><strong>Active wholesalers:</strong> {data?.roles?.activeWholesalers || 0}</p></div>
       </div>
     </div>
@@ -1241,7 +1555,7 @@ function RewardsVouchersMonitor() {
         <label className="field">Action<select value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value as "add" | "deduct" })}><option value="add">Add coins</option><option value="deduct">Deduct coins</option></select></label>
         <label className="field">Coins<input type="number" min={1} step={1} value={form.coins} onChange={(e) => setForm({ ...form, coins: Math.max(0, Math.floor(Number(e.target.value || 0))) })} required /></label>
         <label className="field wide">Reason / description<input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} required minLength={3} maxLength={500} /></label>
-        <div className="wide"><button className="button-primary" disabled={busy}>{busy ? "Savingâ€¦" : "Apply adjustment"}</button></div>
+        <div className="wide"><button className="button-primary" disabled={busy}>{busy ? "Saving…" : "Apply adjustment"}</button></div>
       </form>
     </div>
 
@@ -1253,19 +1567,19 @@ function RewardsVouchersMonitor() {
 
     <div className="dashboard-card stack"><h3>Recent issued vouchers</h3>
       <div style={{ overflowX: "auto" }}><table className="admin-table"><thead><tr><th>Code</th><th>User</th><th>Amount</th><th>Min order</th><th>Status</th><th>Expires</th></tr></thead><tbody>
-        {(data?.recentVouchers ?? []).length === 0 ? <tr><td colSpan={6} className="subtle">No vouchers.</td></tr> : (data?.recentVouchers ?? []).map((v) => <tr key={v._id}><td><strong>{v.voucherCode}</strong></td><td>{v.user ? `${v.user.name || ""} (${v.user.email || ""})` : "-"}</td><td>à§³{Number(v.amount || 0).toLocaleString("en-BD")}</td><td>à§³{Number(v.minOrderAmount || 0).toLocaleString("en-BD")}</td><td>{v.status}</td><td>{v.expiresAt ? new Date(v.expiresAt).toLocaleDateString() : "-"}</td></tr>)}
+        {(data?.recentVouchers ?? []).length === 0 ? <tr><td colSpan={6} className="subtle">No vouchers.</td></tr> : (data?.recentVouchers ?? []).map((v) => <tr key={v._id}><td><strong>{v.voucherCode}</strong></td><td>{v.user ? `${v.user.name || ""} (${v.user.email || ""})` : "-"}</td><td>৳{Number(v.amount || 0).toLocaleString("en-BD")}</td><td>৳{Number(v.minOrderAmount || 0).toLocaleString("en-BD")}</td><td>{v.status}</td><td>{v.expiresAt ? new Date(v.expiresAt).toLocaleDateString() : "-"}</td></tr>)}
       </tbody></table></div>
     </div>
   </div>;
 }
 
 const STOCK_REASON_LABELS: Record<string, string> = {
-  product_created: "à¦ªà¦£à§à¦¯ à¦¤à§ˆà¦°à¦¿",
-  product_updated: "à¦¸à§à¦Ÿà¦• à¦†à¦ªà¦¡à§‡à¦Ÿ",
-  order_placed: "à¦…à¦°à§à¦¡à¦¾à¦° à¦ªà§à¦²à§‡à¦¸",
-  order_cancelled: "à¦…à¦°à§à¦¡à¦¾à¦° à¦¬à¦¾à¦¤à¦¿à¦²",
-  order_rollback: "à¦šà§‡à¦•à¦†à¦‰à¦Ÿ à¦¬à§à¦¯à¦°à§à¦¥ (à¦«à§‡à¦°à¦¤)",
-  return_restocked: "à¦«à§‡à¦°à¦¤ à¦ªà¦£à§à¦¯ à¦«à¦¿à¦°à§‡ à¦à¦¸à§‡à¦›à§‡",
+  product_created: "পণ্য তৈরি",
+  product_updated: "স্টক আপডেট",
+  order_placed: "অর্ডার প্লেস",
+  order_cancelled: "অর্ডার বাতিল",
+  order_rollback: "চেকআউট ব্যর্থ (ফেরত)",
+  return_restocked: "ফেরত পণ্য ফিরে এসেছে",
 };
 
 type StockMovementRow = {
@@ -1317,10 +1631,10 @@ function StockMovementsMonitor() {
 
   return <div className="stack">
     <div className="dashboard-card stack"><h3>Stock movement log</h3>
-      <p className="subtle">à¦•à§‡, à¦•à§‡à¦¨ à¦à¦¬à¦‚ à¦•à¦–à¦¨ à¦¸à§à¦Ÿà¦• à¦¬à¦¦à¦²à§‡à¦›à§‡ â€” à¦ªà§à¦°à¦¤à¦¿à¦Ÿà¦¿ à¦à¦¨à§à¦Ÿà§à¦°à¦¿ à¦…à¦ªà¦°à¦¿à¦¬à¦°à§à¦¤à¦¨à¦¯à§‹à¦—à§à¦¯à¥¤ à¦¬à¦¾à¦¤à¦¿à¦² à¦¬à¦¾ à¦«à§‡à¦°à¦¤ à¦¸à§à¦Ÿà¦• à¦«à§‡à¦°à¦¤à¦“ à¦à¦–à¦¾à¦¨à§‡ à¦¦à§‡à¦–à¦¾ à¦¯à¦¾à¦¯à¦¼à¥¤</p>
+      <p className="subtle">কে, কেন এবং কখন স্টক বদলেছে — প্রতিটি এন্ট্রি অপরিবর্তনযোগ্য। বাতিল বা ফেরত স্টক ফেরতও এখানে দেখা যায়।</p>
       <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void load(); }}>
         <label className="field">Reason<select value={reason} onChange={(event) => setReason(event.target.value)}>
-          <option value="">à¦¸à¦¬</option>
+          <option value="">সব</option>
           {Object.entries(STOCK_REASON_LABELS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
         </select></label>
         <label className="field">Product ID (optional)<input value={productId} onChange={(event) => setProductId(event.target.value)} maxLength={24} placeholder="64b..." /></label>
@@ -1345,6 +1659,78 @@ function StockMovementsMonitor() {
   </div>;
 }
 
+type ProductRecoveryBinProps = {
+  items: Item[];
+  page: number;
+  pages: number;
+  total: number;
+  selectedIds: string[];
+  canPermanentlyDelete: boolean;
+  onSelectionChange: (ids: string[]) => void;
+  onPageChange: (page: number) => void;
+  onRestore: (ids: string[]) => void;
+  onPermanentlyDelete: (id: string) => void;
+};
+
+function ProductRecoveryBin({
+  items, page, pages, total, selectedIds, canPermanentlyDelete,
+  onSelectionChange, onPageChange, onRestore, onPermanentlyDelete,
+}: ProductRecoveryBinProps) {
+  const allSelected = items.length > 0 && items.every((item) => selectedIds.includes(item._id));
+  return <div className="stack">
+    <div className="dashboard-card stack">
+      <p className="subtle">Deleted products from every category, subcategory, creator, and approval state appear here. Restore preserves saved approval and visibility unless the associated vendor account is inactive.</p>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+        <strong>Deleted products: {total}</strong>
+        <button className="button-primary" disabled={selectedIds.length === 0} onClick={() => onRestore(selectedIds)}>Restore selected ({selectedIds.length})</button>
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table className="data-table">
+          <thead><tr>
+            <th><input type="checkbox" aria-label="Select all products on this page" checked={allSelected} onChange={(event) => onSelectionChange(event.target.checked ? items.map((item) => item._id) : [])} /></th>
+            <th>Product</th><th>Category</th><th>Added by</th><th>Deleted by</th><th>Deleted date</th><th>Approval / visibility</th><th>Actions</th>
+          </tr></thead>
+          <tbody>
+            {items.length === 0 ? <tr><td colSpan={8} className="subtle">No deleted products.</td></tr> : items.map((item) => {
+              const productName = item.title?.en || item.title?.bn || "Untitled product";
+              const categoryName = typeof item.category === "object" && item.category !== null ? item.category.name?.en || item.category.name?.bn || "—" : "—";
+              const addedBy = item.createdByName
+                ? `${item.createdByName}${item.createdByRole ? ` (${item.createdByRole.replace(/_/g, " ")})` : ""}`
+                : typeof item.vendor === "object" && item.vendor !== null
+                  ? item.vendor.shopName || item.vendor.name || "Vendor"
+                  : "Not recorded (legacy product)";
+              const deletedBy = item.deletedByName || (isRecord(item.deletedBy) && typeof item.deletedBy.name === "string" ? item.deletedBy.name : "Unknown");
+              const deletedByRole = item.deletedByRole ? ` (${item.deletedByRole.replace(/_/g, " ")})` : "";
+              const imageUrl = item.images?.[0];
+              return <tr key={item._id}>
+                <td><input type="checkbox" aria-label={`Select ${productName}`} checked={selectedIds.includes(item._id)} onChange={(event) => onSelectionChange(event.target.checked ? [...selectedIds, item._id] : selectedIds.filter((id) => id !== item._id))} /></td>
+                <td><div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 180 }}>
+                  {imageUrl ? <Image src={imageUrl} alt="" width={48} height={48} unoptimized style={{ objectFit: "contain", borderRadius: 4, background: "#f8f7f2" }} /> : <span className="subtle">No image</span>}
+                  <strong>{productName}</strong>
+                </div></td>
+                <td>{categoryName}</td>
+                <td>{addedBy}</td>
+                <td>{deletedBy}{deletedByRole}</td>
+                <td>{item.deletedAt ? new Date(item.deletedAt).toLocaleString() : "—"}</td>
+                <td>{item.approved === false ? "Pending approval" : "Approved"} · {item.deletedActive === true ? "Active before deletion" : "Inactive before deletion"}</td>
+                <td>
+                  <button className="inline-button" onClick={() => onRestore([item._id])}>Restore</button>
+                  {canPermanentlyDelete && <button className="inline-button" onClick={() => onPermanentlyDelete(item._id)}>Permanently delete</button>}
+                </td>
+              </tr>;
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10 }}>
+        <button className="button-secondary" disabled={page <= 1} onClick={() => onPageChange(page - 1)}>Previous</button>
+        <span className="subtle">Page {page} of {pages}</span>
+        <button className="button-secondary" disabled={page >= pages} onClick={() => onPageChange(page + 1)}>Next</button>
+      </div>
+    </div>
+  </div>;
+}
+
 type PaymentRow = {
   _id: string;
   status: string;
@@ -1363,10 +1749,10 @@ function ShippingPaymentSettings() {
   const [delivery, setDelivery] = useState<DeliveryConfigState>({ deliveryChargeEnabled: true, insideDhakaCharge: 60, outsideDhakaCharge: 120, freeDeliveryEnabled: false, freeDeliveryThreshold: 5000 });
   const [methods, setMethods] = useState<PaymentMethodSetting[]>([
     { method: "COD", label: "Cash on Delivery", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "BKASH", label: "bKash", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "NAGAD", label: "Nagad", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "ROCKET", label: "Rocket", enabled: true, accountNumber: "", accountName: "", instructions: "" },
-    { method: "BANK", label: "Bank Transfer", enabled: true, accountNumber: "", accountName: "", instructions: "" },
+    { method: "BKASH", label: "bKash", enabled: false, accountNumber: "", accountName: "", instructions: "" },
+    { method: "NAGAD", label: "Nagad", enabled: false, accountNumber: "", accountName: "", instructions: "" },
+    { method: "ROCKET", label: "Rocket", enabled: false, accountNumber: "", accountName: "", instructions: "" },
+    { method: "BANK", label: "Bank Transfer", enabled: false, accountNumber: "", accountName: "", instructions: "" },
   ]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -1417,28 +1803,28 @@ function ShippingPaymentSettings() {
     finally { setBusy(false); }
   }
 
-  if (loading) return <div className="dashboard-card"><p className="subtle">Loading shipping & payment settingsâ€¦</p></div>;
+  if (loading) return <div className="dashboard-card"><p className="subtle">Loading shipping & payment settings…</p></div>;
   return <div className="stack">
-    <div className="dashboard-card stack"><h3>Shipping / Delivery Settings (Regular customers)</h3><p className="subtle">à¦¸à¦¾à¦§à¦¾à¦°à¦£ à¦•à¦¾à¦¸à§à¦Ÿà¦®à¦¾à¦°à§‡à¦° à¦šà§‡à¦•à¦†à¦‰à¦Ÿà§‡à¦° à¦œà¦¨à§à¦¯ à¦¡à§‡à¦²à¦¿à¦­à¦¾à¦°à¦¿ à¦šà¦¾à¦°à§à¦œ à¦¨à¦¿à¦¯à¦¼à¦¨à§à¦¤à§à¦°à¦£à¥¤ à¦¹à§‹à¦²à¦¸à§‡à¦²/à¦°à¦¿à¦¸à§‡à¦²à¦¾à¦° à¦…à¦°à§à¦¡à¦¾à¦° à¦°à¦¿à¦•à§‹à¦¯à¦¼à§‡à¦¸à§à¦Ÿà§‡à¦° à¦¨à¦¿à¦¯à¦¼à¦® à¦…à¦ªà¦°à¦¿à¦¬à¦°à§à¦¤à¦¿à¦¤à¥¤</p>
+    <div className="dashboard-card stack"><h3>Shipping / Delivery Settings (Regular customers)</h3><p className="subtle">সাধারণ কাস্টমারের চেকআউটের জন্য ডেলিভারি চার্জ নিয়ন্ত্রণ। হোলসেল/রিসেলার অর্ডার রিকোয়েস্টের নিয়ম অপরিবর্তিত।</p>
       {error && <p className="form-error">{error}</p>}{notice && <p className="form-success">{notice}</p>}
       <div className="form-grid">
-        <label className="field"><span>Delivery charge system</span><select value={delivery.deliveryChargeEnabled ? "on" : "off"} onChange={(e) => setDelivery({ ...delivery, deliveryChargeEnabled: e.target.value === "on" })}><option value="on">Enabled (Add)</option><option value="off">Disabled / Removed (à§³0)</option></select></label>
-        <label className="field"><span>Inside Dhaka charge (à§³)</span><input type="number" min={0} step={1} value={delivery.insideDhakaCharge} onChange={(e) => setDelivery({ ...delivery, insideDhakaCharge: Number(e.target.value || 0) })} /></label>
-        <label className="field"><span>Outside Dhaka charge (à§³)</span><input type="number" min={0} step={1} value={delivery.outsideDhakaCharge} onChange={(e) => setDelivery({ ...delivery, outsideDhakaCharge: Number(e.target.value || 0) })} /></label>
-        <label className="field"><span>Free delivery rule</span><select value={delivery.freeDeliveryEnabled ? "on" : "off"} onChange={(e) => setDelivery({ ...delivery, freeDeliveryEnabled: e.target.value === "on" })}><option value="off">Disabled</option><option value="on">Enabled</option></select></label>
-        <label className="field"><span>Free delivery threshold (à§³ order total â‰¥)</span><input type="number" min={0} step={1} value={delivery.freeDeliveryThreshold} onChange={(e) => setDelivery({ ...delivery, freeDeliveryThreshold: Number(e.target.value || 0) })} /></label>
+        <label className="field"><span>Free delivery for all orders</span><select value={delivery.deliveryChargeEnabled ? "off" : "on"} onChange={(e) => setDelivery({ ...delivery, deliveryChargeEnabled: e.target.value !== "on" })}><option value="off">Disabled (use area charges)</option><option value="on">Enabled (৳0 for every order)</option></select></label>
+        <label className="field"><span>Inside Dhaka charge (৳)</span><input type="number" min={0} step={1} value={delivery.insideDhakaCharge} onChange={(e) => setDelivery({ ...delivery, insideDhakaCharge: Number(e.target.value || 0) })} /></label>
+        <label className="field"><span>Outside Dhaka charge (৳)</span><input type="number" min={0} step={1} value={delivery.outsideDhakaCharge} onChange={(e) => setDelivery({ ...delivery, outsideDhakaCharge: Number(e.target.value || 0) })} /></label>
+        <label className="field"><span>Extra free delivery above threshold</span><select value={delivery.freeDeliveryEnabled ? "on" : "off"} onChange={(e) => setDelivery({ ...delivery, freeDeliveryEnabled: e.target.value === "on" })}><option value="off">Disabled</option><option value="on">Enabled</option></select></label>
+        <label className="field"><span>Free delivery threshold (৳ order total ≥)</span><input type="number" min={0} step={1} value={delivery.freeDeliveryThreshold} onChange={(e) => setDelivery({ ...delivery, freeDeliveryThreshold: Number(e.target.value || 0) })} /></label>
       </div>
-      <p className="subtle">à¦šà§‡à¦•à¦†à¦‰à¦Ÿà§‡ à¦¡à§‡à¦²à¦¿à¦­à¦¾à¦°à¦¿ à¦à¦²à¦¾à¦•à¦¾ à¦“ à¦¸à¦¾à¦¬à¦Ÿà§‹à¦Ÿà¦¾à¦²à§‡à¦° à¦“à¦ªà¦° à¦­à¦¿à¦¤à§à¦¤à¦¿ à¦•à¦°à§‡ à¦šà¦¾à¦°à§à¦œ à¦…à¦Ÿà§‹à¦®à§‡à¦Ÿà¦¿à¦• à¦†à¦ªà¦¡à§‡à¦Ÿ à¦¹à¦¬à§‡à¥¤ à¦«à§à¦°à¦¿ à¦¡à§‡à¦²à¦¿à¦­à¦¾à¦°à¦¿ à¦šà¦¾à¦²à§ à¦¥à¦¾à¦•à¦²à§‡ à¦¨à¦¿à¦°à§à¦§à¦¾à¦°à¦¿à¦¤ à¦Ÿà¦¾à¦•à¦¾à¦° à¦“à¦ªà¦°à§‡ à¦šà¦¾à¦°à§à¦œ à§³0 à¦¹à¦¬à§‡à¥¤</p>
+      <p className="subtle">Free delivery for all orders চালু থাকলে সব অর্ডারে ৳0; বন্ধ থাকলে ঢাকার ভেতর/বাইরের নির্ধারিত চার্জ প্রযোজ্য। Extra threshold চালু থাকলে নির্দিষ্ট সাবটোটালের ওপরে আলাদা ফ্রি ডেলিভারি প্রযোজ্য।</p>
     </div>
 
-    <div className="dashboard-card stack"><h3>Payment Methods (COD, bKash, Nagad, Rocket, Bank)</h3><p className="subtle">à¦ªà§à¦°à¦¤à¦¿à¦Ÿà¦¿ à¦®à§‡à¦¥à¦¡ Enable/Disable à¦•à¦°à§à¦¨ à¦à¦¬à¦‚ à¦…à§à¦¯à¦¾à¦•à¦¾à¦‰à¦¨à§à¦Ÿ à¦¨à¦®à§à¦¬à¦°/à¦¨à¦¿à¦°à§à¦¦à§‡à¦¶à¦¨à¦¾ à¦¦à¦¿à¦¨à¥¤ à¦…à§à¦¯à¦¾à¦•à¦¾à¦‰à¦¨à§à¦Ÿ à¦¨à¦®à§à¦¬à¦° à¦¨à¦¾ à¦¥à¦¾à¦•à¦²à§‡à¦“ à¦šà§‡à¦•à¦†à¦‰à¦Ÿà§‡ à¦…à¦ªà¦¶à¦¨à¦Ÿà¦¿ à¦•à§à¦²à¦¿à¦•à§‡à¦¬à¦² à¦¥à¦¾à¦•à¦¬à§‡à¥¤</p>
+    <div className="dashboard-card stack"><h3>Payment Methods (COD, bKash, Nagad, Rocket, Bank)</h3><p className="subtle">প্রতিটি মেথড Enable/Disable করুন এবং অ্যাকাউন্ট নম্বর/নির্দেশনা দিন। অ্যাকাউন্ট নম্বর না থাকলেও চেকআউটে অপশনটি ক্লিকেবল থাকবে।</p>
       {methods.map((m, i) => <div key={m.method} className="form-card" style={{ width: "100%", marginBottom: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}><strong>{m.method}</strong><label style={{ display: "flex", gap: 6, alignItems: "center" }}><input type="checkbox" checked={m.enabled} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, enabled: e.target.checked } : x))} /> Enabled</label></div>
         <div className="form-grid" style={{ marginTop: 10 }}>
           <label className="field"><span>Display label</span><input value={m.label} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, label: e.target.value } : x))} maxLength={120} /></label>
           <label className="field"><span>Account / Merchant name</span><input value={m.accountName} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, accountName: e.target.value } : x))} maxLength={120} /></label>
           <label className="field wide"><span>Account number</span><input value={m.accountNumber} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, accountNumber: e.target.value } : x))} maxLength={120} placeholder={m.method === "COD" ? "N/A for COD" : "e.g. 01XXXXXXXXX or bank account"} /></label>
-          <label className="field wide"><span>Instructions (checkout-à¦ à¦¦à§‡à¦–à¦¾à¦¬à§‡)</span><textarea value={m.instructions} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, instructions: e.target.value } : x))} maxLength={1000} /></label>
+          <label className="field wide"><span>Instructions (checkout-এ দেখাবে)</span><textarea value={m.instructions} onChange={(e) => setMethods((cur) => cur.map((x, idx) => idx === i ? { ...x, instructions: e.target.value } : x))} maxLength={1000} /></label>
         </div>
       </div>)}
       <div><button className="button-primary" disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : "Save Shipping & Payment Settings"}</button></div>
@@ -1503,7 +1889,7 @@ function BkashPaymentsMonitor() {
 
   return <div className="stack">
     <div className="dashboard-card stack"><h3>Manual payments (bKash / Nagad / Rocket / Bank)</h3>
-      <p className="subtle">à¦•à¦¾à¦¸à§à¦Ÿà¦®à¦¾à¦° à¦ªà§à¦°à¦¦à¦¤à§à¦¤ Transaction/Reference ID à¦“ Sender/Account à¦¤à¦¥à§à¦¯ à¦¨à¦¿à¦œà¦¸à§à¦¬ à¦…à§à¦¯à¦¾à¦•à¦¾à¦‰à¦¨à§à¦Ÿà§‡ à¦®à¦¿à¦²à¦¿à¦¯à¦¼à§‡ Verify/Reject à¦•à¦°à§à¦¨à¥¤ Verify à¦•à¦°à¦²à§‡ pending à¦…à¦°à§à¦¡à¦¾à¦° confirmed à¦¹à¦¬à§‡à¥¤</p>
+      <p className="subtle">কাস্টমার প্রদত্ত Transaction/Reference ID ও Sender/Account তথ্য নিজস্ব অ্যাকাউন্টে মিলিয়ে Verify/Reject করুন। Verify করলে pending অর্ডার confirmed হবে।</p>
       <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void load(); }}>
         <label className="field">Status<select value={status} onChange={(event) => setStatus(event.target.value)}>
           <option value="pending">Pending</option>

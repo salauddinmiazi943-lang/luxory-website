@@ -6,12 +6,12 @@ import { requirePermission } from "@/lib/auth";
 import { apiError, readJson } from "@/lib/http";
 
 const METHODS = ["COD", "BKASH", "NAGAD", "ROCKET", "BANK"] as const;
-const defaults: Record<string, { label: string; accountNumber: string; accountName: string; instructions: string }> = {
-  COD: { label: "Cash on Delivery", accountNumber: "", accountName: "", instructions: "Pay when your order is delivered." },
-  BKASH: { label: "bKash", accountNumber: process.env.NEXT_PUBLIC_BKASH_NUMBER?.trim() || "", accountName: process.env.NEXT_PUBLIC_BKASH_MERCHANT_LABEL?.trim() || "Send Money", instructions: "Send money and enter sender number and Transaction ID." },
-  NAGAD: { label: "Nagad", accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
-  ROCKET: { label: "Rocket", accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
-  BANK: { label: "Bank Transfer", accountNumber: "", accountName: "", instructions: "Transfer to the account and enter sender/account info and Transaction/Reference ID." },
+const defaults: Record<string, { label: string; enabled: boolean; accountNumber: string; accountName: string; instructions: string }> = {
+  COD: { label: "Cash on Delivery", enabled: true, accountNumber: "", accountName: "", instructions: "Pay when your order is delivered." },
+  BKASH: { label: "bKash", enabled: false, accountNumber: process.env.NEXT_PUBLIC_BKASH_NUMBER?.trim() || "", accountName: process.env.NEXT_PUBLIC_BKASH_MERCHANT_LABEL?.trim() || "Send Money", instructions: "Send money and enter sender number and Transaction ID." },
+  NAGAD: { label: "Nagad", enabled: false, accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
+  ROCKET: { label: "Rocket", enabled: false, accountNumber: "", accountName: "", instructions: "Send money and enter sender number and Transaction ID." },
+  BANK: { label: "Bank Transfer", enabled: false, accountNumber: "", accountName: "", instructions: "Transfer to the account and enter sender/account info and Transaction/Reference ID." },
 };
 
 const patchSchema = z.object({
@@ -32,7 +32,7 @@ function merged(rows: Record<string, unknown>[]) {
     return {
       method,
       label: String(row?.label || def.label),
-      enabled: row?.enabled !== false,
+      enabled: row ? row.enabled !== false : def.enabled,
       accountNumber: String(row?.accountNumber || def.accountNumber || ""),
       accountName: String(row?.accountName || def.accountName || ""),
       instructions: String(row?.instructions || def.instructions || ""),
@@ -45,7 +45,7 @@ export async function GET() {
     const access = await requirePermission("manage_bookings");
     if ("error" in access) return access.error;
     await connectDb();
-    const rows = await PaymentMethodSetting.find().lean().catch(() => []);
+    const rows = await PaymentMethodSetting.find().lean();
     return NextResponse.json({ items: merged(rows as Record<string, unknown>[]) });
   } catch (error) {
     return apiError(error);
@@ -66,7 +66,7 @@ export async function PATCH(request: Request) {
         { $set: {
           method: item.method,
           label: (item.label ?? def.label).trim() || def.label,
-          enabled: item.enabled ?? true,
+          enabled: item.enabled ?? def.enabled,
           accountNumber: (item.accountNumber ?? "").trim(),
           accountName: (item.accountName ?? "").trim(),
           instructions: (item.instructions ?? def.instructions).trim() || def.instructions,

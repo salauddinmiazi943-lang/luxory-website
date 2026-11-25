@@ -6,13 +6,13 @@ import { apiError } from "@/lib/http";
 
 export async function GET() {
   try {
-    const access = await requirePermission("manage_products");  
-    if ("error" in access) return access.error;  
-  
+    const access = await requirePermission("manage_products");
+    if ("error" in access) return access.error;
+
     await connectDb();
     const items = await ProductComment.find()
       .populate("product", "title slug")
-      .select("product customerName message createdAt adminReply repliedAt")
+      .select("product customerName message rating images createdAt adminReply repliedAt")
       .sort({ createdAt: -1 })
       .limit(200)
       .lean();

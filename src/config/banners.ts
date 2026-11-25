@@ -9,8 +9,8 @@ export type HeroSlide = {
   buttonText?: { en?: string; bn?: string };
 };
 
-export const HERO_AUTOPLAY_MS = 7500;
-export const HERO_TRANSITION_MS = 800;
+export const HERO_AUTOPLAY_MS = 10_000;
+export const HERO_TRANSITION_MS = 1_400;
 export const HERO_SWIPE_THRESHOLD = 45;
 
 export const HERO_SLIDES: HeroSlide[] = [

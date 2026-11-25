@@ -1,7 +1,7 @@
 ﻿import { z } from "zod";
 import mongoose from "mongoose";
 import { connectDb } from "@/lib/db";
-import { Order, Product, UserWallet, CoinTransaction } from "@/lib/models";
+import { Order, Product, UserWallet, CoinTransaction, PaymentMethodSetting } from "@/lib/models";
 import { getSession, requirePermission, requireUser } from "@/lib/auth";
 import { apiError, clientKey, rateLimit, readJson } from "@/lib/http";
 import { isValidQuantity } from "@/lib/product-units";
@@ -157,12 +157,16 @@ export async function POST(request: Request) {
       }
     }
     await connectDb();
+    const paymentSetting = await PaymentMethodSetting.findOne({ method: parsed.data.paymentMethod }).select("enabled").lean();
+    if (paymentSetting?.enabled === false || (!paymentSetting && parsed.data.paymentMethod !== "COD")) {
+      return Response.json({ error: "The selected payment method is currently disabled." }, { status: 400 });
+    }
     const products = await Product.find({ _id: { $in: parsed.data.items.map((item) => item.productId) }, active: true, approved: true }).lean();
     if (products.length !== new Set(parsed.data.items.map((item) => item.productId)).size) return Response.json({ error: "One or more products are unavailable" }, { status: 400 });
     const orderItems = parsed.data.items.map((line) => {
       const product = products.find((candidate) => String(candidate._id) === line.productId);
       if (!product) throw new Error("One or more products are unavailable");
-      const variants = product.variants as { _id: unknown; stock: number; price: number; originalPrice?: number; label: string }[] | undefined;
+      const variants = product.variants as { _id: unknown; stock: number; price: number; originalPrice?: number; label: string; sku?: string; attributeValues?: Record<string, unknown>; images?: string[] }[] | undefined;
       const variant = line.variantId ? variants?.find((option) => String(option._id) === line.variantId) : undefined;
       if (line.variantId && !variant) throw new Error("A selected product option is no longer available");
       if (!line.variantId && variants?.length) throw new Error("Choose an option for each product");
@@ -178,7 +182,10 @@ export async function POST(request: Request) {
       return {
         productId: product._id, vendorId: product.vendor, title: product.title.en,
         ...(variant && line.variantId ? { variantId: new mongoose.Types.ObjectId(line.variantId), variantLabel: variant.label } : {}),
-        unit: product.unit ?? "piece", image: product.images[0] ?? "", quantity: line.quantity,
+        ...(variant?.sku ? { variantSku: variant.sku } : {}),
+        ...(variant?.attributeValues ? { variantAttributeValues: variant.attributeValues } : {}),
+        ...(variant?.images?.length ? { variantImages: variant.images } : {}),
+        unit: product.unit ?? "piece", image: variant?.images?.[0] ?? product.images[0] ?? "", quantity: line.quantity,
         ...(originalPrice ? { originalPrice } : {}),
         unitPrice,
         ...(originalPrice ? { discountPercent: discountPercent(originalPrice, unitPrice) } : {}),

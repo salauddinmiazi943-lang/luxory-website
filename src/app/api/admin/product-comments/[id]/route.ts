@@ -11,9 +11,9 @@ type Context = { params: Promise<{ id: string }> };
 
 export async function PATCH(request: Request, { params }: Context) {
   try {
-    const access = await requirePermission("manage_products");  
-    if ("error" in access) return access.error;  
-  
+    const access = await requirePermission("manage_products");
+    if ("error" in access) return access.error;
+
     const parsed = await readJson(request, schema);
     if ("error" in parsed) return parsed.error;
     const { id } = await params;
@@ -25,10 +25,25 @@ export async function PATCH(request: Request, { params }: Context) {
       { new: true, runValidators: true },
     )
       .populate("product", "title slug")
-      .select("product customerName message createdAt adminReply repliedAt")
+      .select("product customerName message rating images createdAt adminReply repliedAt")
       .lean();
     if (!item) return NextResponse.json({ error: "Comment not found" }, { status: 404 });
     return NextResponse.json({ item });
+  } catch (error) {
+    return apiError(error);
+  }
+}
+
+export async function DELETE(_request: Request, { params }: Context) {
+  try {
+    const access = await requirePermission("manage_products");
+    if ("error" in access) return access.error;
+    const { id } = await params;
+    if (!mongoose.isValidObjectId(id)) return NextResponse.json({ error: "Invalid review ID" }, { status: 400 });
+    await connectDb();
+    const item = await ProductComment.findByIdAndDelete(id).select("_id").lean();
+    if (!item) return NextResponse.json({ error: "Review not found" }, { status: 404 });
+    return NextResponse.json({ success: true });
   } catch (error) {
     return apiError(error);
   }
