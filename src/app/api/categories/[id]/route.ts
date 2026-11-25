@@ -56,7 +56,7 @@ async function isDescendant(parentId: string, candidateId: string) {
     if (visited.has(currentId)) return true;
     visited.add(currentId);
     if (currentId === parentId) return true;
-    const category = await Category.findById(currentId).select("parentCategory").lean();
+    const category: { parentCategory?: unknown } | null = await Category.findById(currentId).select("parentCategory").lean();
     currentId = category?.parentCategory ? String(category.parentCategory) : null;
   }
   return false;

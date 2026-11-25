@@ -1,4 +1,4 @@
-import { Schema, model, models, type Model } from "mongoose";
+import { Schema, model, models } from "mongoose";
 
 const partySchema = new Schema({
   name: { type: String, required: true, trim: true, maxlength: 120 },
@@ -63,12 +63,8 @@ const accessSchema = new Schema({
   active: { type: Boolean, required: true, default: false, index: true },
 }, { timestamps: true });
 
-function registered<T>(name: string, schema: Schema): Model<T> {
-  return (models[name] as Model<T> | undefined) ?? model<T>(name, schema);
-}
-
-export const AccountParty = registered("AccountParty", partySchema);
-export const AccountCategory = registered("AccountCategory", categorySchema);
-export const AccountTransaction = registered("AccountTransaction", transactionSchema);
-export const AccountOpening = registered("AccountOpening", openingSchema);
-export const AccountAccess = registered("AccountAccess", accessSchema);
+export const AccountParty = models.AccountParty || model("AccountParty", partySchema);
+export const AccountCategory = models.AccountCategory || model("AccountCategory", categorySchema);
+export const AccountTransaction = models.AccountTransaction || model("AccountTransaction", transactionSchema);
+export const AccountOpening = models.AccountOpening || model("AccountOpening", openingSchema);
+export const AccountAccess = models.AccountAccess || model("AccountAccess", accessSchema);
